@@ -164,9 +164,9 @@ def histogram(data: pd.DataFrame|pd.Series,
     title = options.pop("title","Histogram")
     trace_name = options.pop("trace_name",None)
     colors = options.pop("colors", px.colors.qualitative.Plotly)
-    layout_options = {k:v for k,v in options.items() if "axis" in k}
-    for k in layout_options.keys():
-        options.pop(k)
+    layout_options = {k.replace("layout_",""):v for k,v in options.items() if "axis" in k or k.startswith("layout_")}
+    fit_options = {k.replace("fit_",""):v for k,v in options.items() if k.startswith("fit_")}
+    options = {k:v for k,v in options.items() if not ("axis" in k or k.startswith("layout_") or k.startswith("fit_"))}
     trace_names = options.pop("trace_names", [trace_name]*len(data.columns))
     fhwm = 2*np.sqrt(2*np.log(2))
     params = {}
@@ -215,10 +215,82 @@ def histogram(data: pd.DataFrame|pd.Series,
                                      hovertemplate = "<b>(%{x},%{y})</b>"+
                                         f'<br>\u03BC: {popt[1]:.4f}<br>\u03C3: {popt[2]:.4f}'+
                                         f'<br>Ampl.: {popt[0]/(popt[2]*np.sqrt(2*np.pi)):.2f}<br><b>FWHM: {popt[2]*fhwm:.4f}</b>',
+                                    **fit_options
                                     ))
 
     fig.update_layout(barmode='overlay', title=title, **layout_options)
-    # Reduce opacity to see both histograms
+    # Reduce opacity to see all histograms
     fig.update_traces(opacity=0.75)
     fig._params = params
+    return fig
+
+def energy_scatter_plot(data: pd.DataFrame|pd.Series,
+                        energy_map: pd.Series,
+                        warnings: Literal["raise","print","ignore"] = "print",
+                        **options):
+    """Returns a scatter plot of dT vs Energy with one (Series) or more (DataFrame) traces, with ``options`` kwargs passed to the traces
+    
+    - ``energy_map`` must be provided to map the integer indices to corresponding energy
+    """
+    if len(data) == 0 and warnings != "raise":
+        if warnings != "ignore":
+            print("[WARNING] Got empty data, nothing to plot")
+            return go.Figure()
+    elif len(data) == 0:
+        raise ValueError("Got empty data, nothing to plot")
+    if isinstance(data, pd.DataFrame):
+        pass
+    elif isinstance(data, pd.Series) or isinstance(data, np.ndarray):
+        data = pd.DataFrame(data)
+    else:
+        raise ValueError("Data must be a pandas DataFrame or a pandas Series")
+    fig = go.Figure()
+    title = options.pop("title","dT_act - dT_pred vs Energy (arb. units)")
+    trace_name = options.pop("trace_name",None)
+    colors = options.pop("colors", px.colors.qualitative.Plotly)
+    layout_options = {k.replace("layout_",""):v for k,v in options.items() if "axis" in k or k.startswith("layout_")}
+    fit_options = {k.replace("fit_",""):v for k,v in options.items() if k.startswith("fit_")}
+    options = {k:v for k,v in options.items() if not ("axis" in k or k.startswith("layout_") or k.startswith("fit_"))}
+    trace_names = options.pop("trace_names", [trace_name]*len(data.columns))
+    for i,col in enumerate(data.columns):
+        fig.add_trace(go.Scatter(x=energy_map.values,
+                                 y=data[col].values,
+                                 name=trace_names[i] or col,
+                                 mode='markers',
+                                 marker_color=colors[i],
+                                 hovertemplate ='<b>%{x:.0f}: %{y:.0f} ns</b>',
+                                **options,
+                                 ))
+        # CREATING A MEAN ROLLING AVERAGE CURVE OVER THE DATA POINTS
+        # for fit_name,fit_func in {"Gaussian":gaussian}.items():#,"Inv. Quadratic":inv_quadratic_function}.items():
+        #     try:
+        #         p0 = [y_data.max(), x_data[list(y_data).index(y_data.max())], 10]
+        #         # y_max = y_data[list(x_data).index(bins[0]):list(x_data).index(bins[1])].max()
+        #         # p0 = [y_max, x_data[list(y_data).index(y_max)], 10]
+        #         with warns.catch_warnings(record=True) as w:
+        #             warns.simplefilter("always")
+        #             popt, _ = curve_fit(fit_func, x_data, y_data, p0 = p0)
+        #             if len(w) > 0 and issubclass(w[-1].category, OptimizeWarning) and warnings != "ignore":
+        #                 print(f"[WARNING] {fit_name} fit optimization failed for initial guess [A,\u03BC,\u03C3] = {p0}: OptimizeWarning: {w[-1].message}")
+        #     except Exception as e:
+        #         if warnings == "print":
+        #             print(f"[WARNING] {fit_name} fitting failed: {e.__class__.__name__}: {e}")
+        #         elif not warnings in ["ignore","print"]:
+        #             raise e
+        #     params[f"{trace_names[i] or col} {fit_name}"] = dict(
+        #         zip(fit_func.__code__.co_varnames[1:fit_func.__code__.co_argcount+fit_func.__code__.co_kwonlyargcount], popt, strict=True)
+        #     )
+        #     fig.add_trace(go.Scatter(x=x_data,
+        #                              y=fit_func(x_data, *popt),
+        #                              line_color=fig.data[2*i].marker.color,
+        #                              name=f"{fit_name} fit",
+        #                              hovertemplate = "<b>(%{x},%{y})</b>"+
+        #                                 f'<br>\u03BC: {popt[1]:.4f}<br>\u03C3: {popt[2]:.4f}'+
+        #                                 f'<br>Ampl.: {popt[0]/(popt[2]*np.sqrt(2*np.pi)):.2f}<br><b>FWHM: {popt[2]*fhwm:.4f}</b>',
+        #                             **fit_options
+        #                             ))
+    
+    fig.update_layout(barmode='overlay', title=title, **layout_options)
+    # Reduce opacity to see all scatters
+    fig.update_traces(opacity=0.75)
     return fig
