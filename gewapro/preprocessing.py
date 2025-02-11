@@ -26,12 +26,41 @@ def train_test_split_cond(*arrays, test_size=None, train_size=None, random_state
                     print(f"Appended not conditioned array {i}/{len(not_conditioned_arrays)} to split array index {i}")
     return split_arrays
 
+# def get_split_waveforms(uniform_test_set: list[int] = []):
+#     data_df = get_waveforms(source_data=data, get_indices_map=False, include_energy=include_energy, select_energies=select_energies, select_channels=select_channels)
+#     if uniform_test_set:
+#         if not (isinstance(uniform_test_set, list) and all([isinstance(x,int) for x in uniform_test_set])):
+#             raise ValueError("Uniform test set must be a list of integer energy bounds (energy in arb. units)")
+#         test_ranges = sorted([(x,y) for x,y in list(zip(uniform_test_set[:-1],uniform_test_set[1:])) if x<y])
+#         test_sets = {f"{test_range}": get_waveforms(source_data=data,
+#                                                     get_indices_map=False,
+#                                                     include_energy=include_energy,
+#                                                     select_energies=test_range,
+#                                                     select_channels=select_channels) for test_range in test_ranges}
+#         smallest_set = min(*[len(df.columns) for df in test_sets.values()])
+#         test_sets = {k: df.iloc[:,:smallest_set] for k,df in test_sets.items()}
+#         print(f"[MLFlow run] Created uniform test sets of length {smallest_set} in energy (arb. unit) ranges:",test_ranges)
+
+def select_from_source(source_data: pd.DataFrame,
+                       select_channels: list[int]|int = [],
+                       select_energies: tuple[int, int] = ()):
+    """Selects a part of the source data (NOT as a deep copy) based on channels and/or energies"""
+    if select_channels:
+        channel_condition = combine_or(*[source_data["Ch"] == ch for ch in ([select_channels] if isinstance(select_channels,int) else select_channels)])
+    else:
+        channel_condition = np.array([True]*len(source_data))
+    if select_energies:
+        energy_condition = (source_data["E"] >= select_energies[0]) & (source_data["E"] < select_energies[1])
+    else:
+        energy_condition = np.array([True]*len(source_data))
+    return source_data[channel_condition & energy_condition]
+
 def get_waveforms(*indices: int,
                   source_data: pd.DataFrame,
                   get_indices_map: bool = False,
                   include_energy: bool = False,
-                  select_channels: List[int]|int = [],
-                  select_energies: Tuple[int, int] = (),
+                  select_channels: list[int]|int = [],
+                  select_energies: tuple[int, int] = (),
                  ):
     """Gets plottable waveforms dataframe using .iplot(). Indices may be start,stop for slicing, or list of indices
     
@@ -51,15 +80,7 @@ def get_waveforms(*indices: int,
         (min, max) tuple of which energies to select (right bound exclusive) in the data set. If empty or None, gives
         full data set (default behaviour)
     """
-    if select_channels:
-        channel_condition = combine_or(*[source_data["Ch"] == ch for ch in ([select_channels] if isinstance(select_channels,int) else select_channels)])
-    else:
-        channel_condition = np.array([True]*len(source_data))
-    if select_energies:
-        energy_condition = (source_data["E"] >= select_energies[0]) & (source_data["E"] < select_energies[1])
-    else:
-        energy_condition = np.array([True]*len(source_data))
-    source_data = source_data[channel_condition & energy_condition]
+    source_data = select_from_source(source_data=source_data, select_channels=select_channels, select_energies=select_energies)
 
     if len(indices) == 1 and isinstance(indices[0], (list, int)):
         indices = [indices[0]] if isinstance(indices[0], int) else indices[0]
@@ -71,18 +92,20 @@ def get_waveforms(*indices: int,
         raise ValueError("Invalid indices provided. May be start,stop args for slicing, or list of indices")
 
     data_vals = source_data.values
+    i = {"dT":"-"} | {col:i for i,col in enumerate(source_data.columns) if col in ["Ch","E","Tref","dT","s0"]}
+    # print(source_data.columns, i,"\n", source_data.head(n=3))
     if include_energy: # Includes 1/50_000th of the energy in eV (max was ~56e3 eV)
-        data = {f"[{i}] {data_vals[i][2]} dT, {int(data_vals[i][1])}eV": np.append(data_vals[i][1]*2e-5, data_vals[i][3:]) for i in indices}
+        data = {f"[{j}] Tref {data_vals[j][i['Tref']]}, dT {'-' if i['dT'] == '-' else data_vals[j][i['dT']]}, E {int(data_vals[j][i['E']])}": np.append(data_vals[j][i['E']]*2e-5, data_vals[j][i['s0']:]) for j in indices}
     else:
-        data = {f"[{i}] {data_vals[i][2]} dT, {int(data_vals[i][1])}eV": data_vals[i][3:] for i in indices}
+        data = {f"[{j}] Tref {data_vals[j][i['Tref']]}, dT {'-' if i['dT'] == '-' else data_vals[j][i['dT']]}, E {int(data_vals[j][i['E']])}": data_vals[j][i['s0']:] for j in indices}
     df = pd.DataFrame(data=data)
     if get_indices_map is True:
         return df, {j: list(data.keys())[i] for i,j in enumerate(indices)}
     return df
 
 def smoothen_waveforms(wave_df: pd.DataFrame,
-                       smoothing_window: int|Tuple[int,int],
-                       apply_to_energies: Tuple[int, int] = None,
+                       smoothing_window: int|tuple[int,int],
+                       apply_to_energies: tuple[int, int] = None,
                        in_place: bool|Literal["replace"] = True,
                        normalize: bool|Literal["original"] = "original"):
     """Smoothens waveforms using a uniform rolling window on their derivatives. Window size equal to noise frequency works best

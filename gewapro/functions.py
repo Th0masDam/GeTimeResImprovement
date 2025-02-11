@@ -3,6 +3,7 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 import numba as nb
+from typing import Literal
 from scipy.optimize import curve_fit
 from sklearn.linear_model import LinearRegression
 
@@ -41,6 +42,35 @@ def gaussian(x: float, a: float, x0: float, sigma: float):
 def inverse_quadratic(x: float, a: float, x0: float, sigma: float):
     b = 3.37580799191/(sigma**2)
     return a*np.sqrt(b)/(np.pi*(1+b*(x-x0)**2))
+
+def var(s: pd.Series, which: Literal["+","-"]) -> float:
+    s_dif = (s - s.mean())
+    if which == "+":
+        s_pos = s[s_dif >= 0]
+        return s_pos.mean()
+    elif which == "-":
+        s_neg = -s[s_dif < 0]
+        return s_neg.mean()
+    else:
+        raise ValueError("which must be '+', '-' or None")
+
+def rmse(s: pd.Series, which: Literal["+","-"]|None = None) -> float:
+    s_dif = (s - s.mean())
+    if which is None:
+        return np.sqrt((s_dif*s_dif).sum()/len(s))
+    elif which == "+":
+        s_pos = s[s_dif >= 0]
+        return np.sqrt((s_pos*s_pos).sum()/len(s))
+    elif which == "-":
+        s_neg = s[s_dif < 0]
+        return np.sqrt((s_neg*s_neg).sum()/len(s))
+    else:
+        raise ValueError("which must be '+', '-' or None")
+
+def calc_ab(line_511: int, line_1274: int) -> tuple[int,int]:
+    a = (1274 - 511) / (line_1274 - line_511)
+    b = 511 - a * line_511
+    return a,b
 
 @nb.njit
 def quadratic_arr(x: np.array, a: float, x0: float):
