@@ -1,5 +1,6 @@
 import os
 import pandas as pd
+import numpy as np
 from typing import Iterable
 from gewapro.functions import rmse, var
 
@@ -11,9 +12,9 @@ def _validate_a_b(correct_energy: tuple[float,float]|dict) -> tuple[float,float]
     else:
         raise ValueError("correct_energy must be a list/dict of two floats (a & b) where a is a factor and b is an offset")
 
-def correct_energy(correct_energy: tuple[float,float], energy_labels: pd.Series) -> pd.Series:
+def correct_energy(correct_energy: tuple[float,float], energy_labels: pd.Series|np.ndarray):
     a,b = _validate_a_b(correct_energy=correct_energy)
-    return energy_labels.apply(lambda x: a*x+b)
+    return a*energy_labels+b
 
 def invert_start_end_step(start: int, end: int, step: int, a: float, b: float) -> tuple[int,int,int]:
     """Gets original start end step from newly corrected start end step"""
@@ -35,15 +36,24 @@ def join_strings(iterable: Iterable, bound: int=5, final_connector: str = "or", 
     """Joins all items in ``iterable`` (up to max ``bound``) with ',' and the final with ``final_connector``
     
     Strings will be wrapped with the ``wrap_str`` argument, by default with double quotes (")"""
-    b = bound - 2
+    bound,show = (bound, bound-2) if isinstance(bound,int) else bound
     fc = " "+final_connector
     wrap_str = str(wrap_str) if wrap_str else ""
     ls = [(wrap_str+i+wrap_str if (isinstance(i,str)) else str(i)) for i in iterable] if wrap_str else [str(i) for i in iterable]
     if wrap_all and isinstance(wrap_all, str):
         ls = [wrap_all+s+wrap_all for s in ls]
-    new_list = ls[:b-1]+[f"... <{len(ls)-b} more> ..."]+ls[-1:] if (bound and len(ls) > bound) else ls
+    new_list = ls[:show-1]+[f"... <{len(ls)-show} more> ..."]+ls[-1:] if (bound and len(ls) > bound) else ls
     return_str = f"{fc} ".join(new_list).replace(f"...{fc}","...").replace(f"{fc} ",", ",len(ls)-2)
     return return_str
+
+def pandas_string_rep(obj: pd.DataFrame|pd.Series, bound: int|tuple[int,int]=5):
+    """Returns compact string representation of Series or DataFrame"""
+    if isinstance(obj, pd.DataFrame):
+        return f"<DataFrame (columns: {join_strings([f"\"{tup[0]}\" ({tup[1]})" for tup in zip(obj.columns,obj.dtypes)],bound,"&",wrap_str="")})>"
+    elif isinstance(obj, pd.Series):
+        return "<Series ("+(f"name: \"{obj.name}\", " if obj.name else "")+f"values ({obj.dtype}): {join_strings(obj,bound,"&")})>"
+    else:
+        raise ValueError("obj must be a Series or DataFrame")
 
 def add_notes(error: Exception, *notes):
     for note in notes:
@@ -53,8 +63,8 @@ def add_notes(error: Exception, *notes):
 def stats(df: pd.DataFrame):
     data = {}
     for col in df.columns:
-        data[col] = [df[col].mean(),rmse(df[col]),rmse(df[col],"+"),rmse(df[col],"-"),var(df[col],"+"),var(df[col],"-")]
-    return pd.DataFrame(data, index=["Mean","RMSE","RMSE+","RMSE-","VAR+","VAR-"])
+        data[col] = [len(df[col]),df[col].mean(),rmse(df[col]),rmse(df[col],"+"),rmse(df[col],"-"),var(df[col],"+"),var(df[col],"-")]
+    return pd.DataFrame(data, index=["N","Mean","RMSE","RMSE+","RMSE-","VAR+","VAR-"])
 
 def remove_all_input_examples_locally():
     """Remove all the input examples from the models in all runs"""

@@ -3,7 +3,8 @@ import numpy as np
 from typing import Tuple, List, Literal, Callable
 from sklearn.model_selection import train_test_split
 from gewapro.functions import combine_or, combine_and
-from gewapro.cache import cache, encode64, dict_from_tup
+from gewapro.util import pandas_string_rep
+from gewapro.cache import cache
 import os
 
 def train_test_split_cond(*arrays, test_size=None, train_size=None, random_state=None, condition=None, add_removed_to_test=False):
@@ -45,6 +46,10 @@ def select_from_source(source_data: pd.DataFrame,
                        select_channels: list[int]|int = [],
                        select_energies: tuple[int, int] = ()):
     """Selects a part of the source data (NOT as a deep copy) based on channels and/or energies"""
+    if not isinstance(source_data, pd.DataFrame):
+        raise TypeError(f"source_data must be a DataFrame, got {source_data}")
+    elif isinstance(source_data, pd.DataFrame) and any([col not in source_data.columns for col in ["Ch","E"]]):
+        raise ValueError(f"source_data must be a DataFrame with columns 'Ch' and 'E', but got: {pandas_string_rep(source_data)}")
     if select_channels:
         channel_condition = combine_or(*[source_data["Ch"] == ch for ch in ([select_channels] if isinstance(select_channels,int) else select_channels)])
     else:

@@ -5,6 +5,7 @@ from typing import Callable
 import plotly.graph_objects as go
 import plotly.express as px
 import mlflow.pyfunc
+from sklearn.decomposition import PCA, TruncatedSVD
 from gewapro.preprocessing import get_waveforms
 from gewapro.plotting.base import histogram, _fwhm_energy_df, _get_counts_for_bins
 from gewapro.models import get_model_version_map
@@ -35,7 +36,8 @@ def energy_histogram(source_data: str,
                      **kwargs):
     """Creates energy histogram from ``source_data`` provided from the ``data_dict`` with ``select_energies`` and ``select_channels``
     
-    Actually gets all energies and zooms in on ``select_energies``"""
+    Actually gets all energies and zooms in on ``select_energies``.
+    Use ``correct_energy`` argument to modify the energy axis (assumes keV after correction)"""
     data_plot = get_waveforms(source_data=data_dict[source_data], select_channels=select_channels)
     s_labels_E = pd.Series(np.array([float([s[s.find("E")+1:] for s in [col.replace(" ","")]][0]) for col in data_plot.columns]), name="Initial data")
     if correct_E := kwargs.pop("correct_energy", False):
@@ -47,7 +49,9 @@ def energy_histogram(source_data: str,
     if select_energies:
         kwargs["xaxis_range"] = select_energies
         kwargs["bins"] = kwargs.pop("bins", [s_labels_E.min(), s_labels_E.max(), (select_energies[1] - select_energies[0]) // 100])
-    return histogram(s_labels_E, title=title, xaxis_title="Energy (arb. unit)", yaxis_title="Prevalence", **kwargs)
+    xaxis_title = kwargs.pop("xaxis_title", "Energy (keV)" if correct_E else "Energy (arb. unit)")
+    yaxis_title = kwargs.pop("yaxis_title","Prevalence")
+    return histogram(s_labels_E, title=title, xaxis_title=xaxis_title, yaxis_title=yaxis_title, **kwargs)
 
 # def _display_runs(exp_ids, x, y, show_original_FWHM, **kwargs):
 #     all_runs = mlflow.search_runs(experiment_ids=exp_ids,search_all_experiments=True)
@@ -191,7 +195,7 @@ def energy_line_plot(on_data: str,
                      data_dict: dict[str,pd.DataFrame],
                      model_name: str = "MLPRegressorModel",
                      select_channels = 0,
-                     PCA_transform_on: str = "self",
+                     PCA_fit: str|PCA|TruncatedSVD = "self",
                      verbose: bool = False,
                     **options) -> go.Figure:
     """Create a plot of FWHM as a function of energy for a specific trained model"""
@@ -199,31 +203,49 @@ def energy_line_plot(on_data: str,
     colors = options.pop("colors", px.colors.qualitative.Plotly)
     opacity = options.pop("opacity", 0.2)
     y_col = options.pop("y_col", "FWHM")
-    y_pos = options.pop("y_pos", "FWHM sd")
-    y_neg = options.pop("y_neg", "FWHM sd")
+    y_sd: str = options.pop("y_sd", "FWHM GoF")
+    y_sd_name = options.pop("y_sd_name", y_sd.replace(y_col,"").lstrip())
+    y_pos = options.pop("y_pos", y_sd)
+    y_neg = options.pop("y_neg", y_sd)
     title = options.pop("title",f"{y_col} vs Energy on '{on_data}'")
     hist_limit = options.pop("hist_limit",250)
+    options["xaxis_title"] = options.pop("xaxis_title", "Energy [keV]" if options.get("correct_energy",False) else "Energy (arb. unit)")
+    options["yaxis_title"] = options.pop("yaxis_title","FWHM [ns]")
+    # Change the start, end ,step if energy is to be corrected
     if correct_E := options.pop("correct_energy", False):
         (a,b),len_ = _validate_a_b(correct_E),get_len(start,end,step)
         start,end,step = invert_start_end_step(start, end, step, a, b)
         print(f"[WARNING] Got new start, end & step to correct energy axis: {start}, {end}, {step} ({len_} periods, {start} + {len_}*{step} = {len_*step+start})")
-    if invalid_bins := [f"{k} ({v})" for k,v in _get_counts_for_bins(start, end, step, data_dict, on_data, select_channels).items() if v<hist_limit]:
-        raise ValueError(F"Got bins with too little observations (less than {hist_limit}): {join_strings(invalid_bins,8,"&","")}")
-    df_fig = _fwhm_energy_df(on_data, start, end, step, model_version, data_dict, model_name, select_channels, PCA_transform_on, verbose)
-    if correct_E:  # Reindex if correct energy is applied
+    # Raise error (with specific note) if bins do not have enough values
+    if (invalid_bins := np.array([[k,v] for k,v in _get_counts_for_bins(start, end, step, data_dict, on_data, select_channels).items() if v<hist_limit])).size > 0:
+        err = ValueError(F"Got bins with too little observations (less than hist_limit of {hist_limit}): {join_strings([f"{k} ({v})" for k,v in invalid_bins],7,"&","")}")
+        old_bins = correct_energy(correct_E, np.array([[int(k[:k.find("-")]),int(k[k.find("-")+1:])] for k in invalid_bins[:,0]])).round().astype(int) if correct_E else []
+        raise add_notes(err, f"In bin units passed to the function: {join_strings([f"{k[0]}-{k[1]} ({v})" for k,v in zip(old_bins,invalid_bins[:,1])],7,"&","")}" if correct_E else "")
+    df_fig = _fwhm_energy_df(on_data, start, end, step, model_version, data_dict, model_name, select_channels, PCA_fit, verbose)
+    if verbose:
+        display(df_fig)
+    # Reindex if correct energy is applied
+    if correct_E:
         df_fig.index = pd.MultiIndex.from_tuples([(i[0], a*i[1]+b) for i in df_fig.index],names=df_fig.index.names)
-    fig = go.Figure(layout={"title":title})
-    for i,ix in enumerate(set(df_fig.index.get_level_values('Series'))):
+    fig = go.Figure(layout={"title":title}|options)
+    for i,ix in enumerate(dict.fromkeys(df_fig.index.get_level_values('Series'))): # Enumerate over the ordered columns
         fig.add_traces([go.Scatter(x = df_fig.loc[ix, :].index, y = df_fig.loc[ix, y_col] + df_fig.loc[ix, y_pos],
-                                mode = 'lines', line_color = 'rgba(0,0,0,0)',
-                                showlegend = False),
+                                mode = 'lines', line_color = 'rgba(0,0,0,0)', showlegend = False), # Top range
                         go.Scatter(x = df_fig.loc[ix, :].index, y = df_fig.loc[ix, y_col] - df_fig.loc[ix, y_neg],
-                                mode = 'lines', line_color = 'rgba(0,0,0,0)',
-                                name = 'Standard deviation',
-                                fill='tonexty', fillcolor = hex_to_rgba(colors[i], opacity)),
+                                mode = 'lines', line_color = 'rgba(0,0,0,0)', name = y_sd_name,
+                                fill='tonexty', fillcolor = hex_to_rgba(colors[i], opacity)), # Bottom range
                         go.Scatter(x = df_fig.loc[ix, :].index, y = df_fig.loc[ix, y_col],
-                                mode = 'lines', name = ix, line_color = colors[i])])
+                                mode = 'lines', name = ix, line_color = colors[i])]) # Line
+    if options.pop("add_df",False) is True:
+        fig._df = df_fig
+        return fig
     return fig
+
+# Add function attributes
+energy_line_plot.cache_info = _fwhm_energy_df.cache_info #cache_info(function_to_inspect=_fwhm_energy_df, cache_dir=cache_dir, ignore_args=ignore_args, pre_cache=pre_cache, post_cache=post_cache)
+"""Returns info on the cached function's cache settings & cache size"""
+energy_line_plot.clear_cache = _fwhm_energy_df.clear_cache #(function_to_clear=_fwhm_energy_df, cache_dir=cache_dir)
+"""Clear the cache of this function"""
 
 def rmse_energy_line_plot(on_data: str,
                           start: int,
@@ -240,4 +262,5 @@ def rmse_energy_line_plot(on_data: str,
     options["y_col"] = "RMSE"
     options["y_pos"] = "RMSE+"
     options["y_neg"] = "RMSE-"
+    options["yaxis_title"] = options.get("yaxis_title","RMSE")
     return energy_line_plot(on_data, start, end, step, model_version, data_dict, model_name, select_channels, PCA_transform_on, verbose, **options)

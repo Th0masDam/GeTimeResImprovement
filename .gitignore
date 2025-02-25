@@ -7,3 +7,4 @@ data/old
 data/*.csv
 data/*.dat
 mlruns/
+mlartifacts/

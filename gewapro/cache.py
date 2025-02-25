@@ -6,7 +6,7 @@ import pandas as pd
 from functools import partial
 from typing import Any, Callable, Dict, List, Tuple, NamedTuple
 import re
-from gewapro.util import add_notes
+from gewapro.util import add_notes, pandas_string_rep
 
 class CacheError(ValueError):
     """Error related to the cache system"""
@@ -62,25 +62,32 @@ Cached files ({f'{self.cache_size:.0f} kB' if self.cache_size < 1024 else f'{sel
 encode64 = lambda input: f"{base64.urlsafe_b64encode(hashlib.sha3_512(f'{input}'.encode()).digest())}"[2:-1].rstrip("=")
 dict_from_tup = lambda tup: dict(zip([t for i,t in enumerate(tup) if i%2==0],[t for i,t in enumerate(tup) if i%2==1], strict=True))
 
-def _func_string(obj: Dict[str, Any]|tuple, limit: int=100):
+def _func_string(obj: dict[str, Any]|tuple, limit: int=100):
     if isinstance(obj, tuple):
         obj = dict_from_tup(obj)
-    string = '('+', '.join([f"{k}='{v}'" if isinstance(v,str) else f"{k}={v}" for k,v in obj.items()])+')'
+    def string_rep_kv_pair(k:str,v:Any):
+        if isinstance(v,(pd.DataFrame,pd.Series)):
+            return f"{k}={pandas_string_rep(v,bound=6)}"
+        elif isinstance(v,str):
+            return f'{k}="{v}"'
+        else:
+            return f"{k}={v}"
+    string = ('('+', '.join([string_rep_kv_pair(k,v) for k,v in obj.items()])+')').replace("\n"," ")
     if len(string) > limit:
-        return string[:round(limit/3)]+" ... "+string[-round(limit/3):].replace("\n","")
-    return string.replace("\n","")
+        return string[:round(limit/3)]+" ... "+string[-round(limit/3):]
+    return string
 
-def _process_kwargs(wrapped: Callable, kwargs: Dict[str, Any], ignore_args: List[str], cache_dir: str|os.PathLike) -> dict:
+def _process_kwargs(wrapped: Callable, kwargs: dict[str, Any], ignore_args: list[str], cache_dir: str|os.PathLike) -> dict:
     """Default ``pre_cache`` function, returns ``{<file_path>: <kwargs>}`` dict"""
     tup = tuple([k_or_v for kv_pair in sorted(kwargs.items()) if (not kv_pair[0] in ignore_args) for k_or_v in kv_pair])
     file_path = f"{os.path.join(cache_dir, f'{wrapped.__name__}_{encode64(tup)}')}.parquet"
     return {file_path: kwargs}
 
-def _process_results(wrapped: Callable, kwargs: Dict[str, Any], call_results: List[pd.DataFrame]):
+def _process_results(wrapped: Callable, kwargs: dict[str, Any], call_results: list[pd.DataFrame]):
     """Default ``post_cache`` function, returns first list item of `call_results`"""
     return call_results[0]
 
-def _clear_cache(function_to_clear: Callable, cache_dir: str|os.PathLike, verbose: bool = False) -> None:
+def _clear_cache(function_to_clear: Callable, cache_dir: str|os.PathLike) -> None:
     def clear_cache(verbose: bool = False):
         """Clears all cache for the function from `cache_dir` directory"""
         if not os.path.exists(cache_dir):
@@ -99,17 +106,20 @@ def _clear_cache(function_to_clear: Callable, cache_dir: str|os.PathLike, verbos
     return clear_cache
 
 
-def cache_info(function_to_inspect: Callable, cache_dir: str|os.PathLike, ignore_args: list, pre_cache: Callable, post_cache: Callable) -> CacheInfo:
+def _cache_info(function_to_inspect: Callable, cache_dir: str|os.PathLike, ignore_args: list, pre_cache: Callable, post_cache: Callable) -> CacheInfo:
     """Returns info on the cached function's cache settings & cache size"""
-    file_path_regex = re.compile(f"{function_to_inspect.__name__}_.*\\.parquet$")
-    matched_files = []
-    for _, _, files in os.walk(cache_dir):
-        for file in files:
-            if file_path_regex.match(file):
-                matched_files.append((file, os.path.getsize(os.path.join(cache_dir,file))/1024))
-    cache_size = round(sum([file[1] for file in matched_files]))
-    matched_files = [file[0]+(f" ({file[1]:.0f} kB)" if file[1]<1024 else f" ({file[1]/1024:.1f} MB)") for file in matched_files]
-    return CacheInfo(function_to_inspect, cache_dir, ignore_args, pre_cache, post_cache, cache_size, matched_files)
+    def cache_info():
+        """Returns info on the cached function's cache settings & cache size"""
+        file_path_regex = re.compile(f"{function_to_inspect.__name__}_.*\\.parquet$")
+        matched_files = []
+        for _, _, files in os.walk(cache_dir):
+            for file in files:
+                if file_path_regex.match(file):
+                    matched_files.append((file, os.path.getsize(os.path.join(cache_dir,file))/1024))
+        cache_size = round(sum([file[1] for file in matched_files]))
+        matched_files = [file[0]+(f" ({file[1]:.0f} kB)" if file[1]<1024 else f" ({file[1]/1024:.1f} MB)") for file in matched_files]
+        return CacheInfo(function_to_inspect, cache_dir, ignore_args, pre_cache, post_cache, cache_size, matched_files)
+    return cache_info
 
 
 def cache(cache_dir: str|os.PathLike = "cache", ignore_args: List[str] = [], pre_cache: Callable = _process_kwargs, post_cache: Callable = _process_results):
@@ -159,7 +169,7 @@ def cache_wrapper(wrapped: Callable, cache_dir: str|os.PathLike, ignore_args: Li
         raise add_notes(CacheError(f"Tuple could not be generated from arguments and keyword arguments: {new_kwargs}"))
     
     # Add function attributes
-    cached_func.cache_info = cache_info(function_to_inspect=wrapped, cache_dir=cache_dir, ignore_args=ignore_args, pre_cache=pre_cache, post_cache=post_cache)
+    cached_func.cache_info = _cache_info(function_to_inspect=wrapped, cache_dir=cache_dir, ignore_args=ignore_args, pre_cache=pre_cache, post_cache=post_cache)
     """Returns info on the cached function's cache settings & cache size"""
     cached_func.clear_cache = _clear_cache(function_to_clear=wrapped, cache_dir=cache_dir)
     """Clear the cache of this function"""
@@ -170,9 +180,9 @@ def cache_wrapper(wrapped: Callable, cache_dir: str|os.PathLike, ignore_args: Li
 def _call_or_get_from_cache(wrapped: Callable, kwargs: dict, file_path: str):
     """Checks if file for current kwargs already exists, otherwise calls `wrapped` with kwargs and saves to `file_path`"""
     if os.path.exists(file_path):
-        print(f"[CACHE WRAPPER] Found file in cache for call {wrapped.__name__}{_func_string(kwargs)}: {file_path}")
+        print(f"[CACHE WRAPPER] Found file in cache for call {wrapped.__name__}{_func_string(kwargs,limit=200)}: {file_path}")
         return pd.read_parquet(file_path)
-    print(f"[CACHE WRAPPER] No cache for call {wrapped.__name__}{_func_string(kwargs)}, running function...")
+    print(f"[CACHE WRAPPER] No cache for call {wrapped.__name__}{_func_string(kwargs,limit=200)}, running function...")
     save_df = wrapped(**kwargs)
     if isinstance(save_df, pd.DataFrame):
         save_df.to_parquet(file_path)

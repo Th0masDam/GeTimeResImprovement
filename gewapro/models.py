@@ -1,9 +1,11 @@
 # Model creation functions
 import tensorflow as tf
 import keras
+# from pydantic import BaseModel
 from typing import Literal
 import xgboost as xgb
 from sklearn.neural_network import MLPRegressor
+from sklearn.decomposition import PCA, TruncatedSVD
 import numpy as np
 from mlflow.models import infer_signature, model
 import mlflow.sklearn
@@ -17,12 +19,132 @@ import warnings
 from gewapro.cache import cache
 import pandas as pd
 import os
+from contextlib import contextmanager
+from gewapro.util import add_notes
+
+def get_models():
+    client = mlflow.MlflowClient()
+    print("Searching for models, this may take a minute...")
+    data = client.search_registered_models()
+    print("Got all models.")
+    models = []
+    for model in data:
+        models.append(model.name)
+    return models
+
+@contextmanager
+def modify_message(*exceptions: Exception, prepend_msg: str = "", append_msg: str = "", replace: dict[str,str] = {}, notes: dict[str,str] = {}):
+    if any(invalid_excepts := [not (isinstance(excep, Exception) or "Exception" in str(excep)) for excep in exceptions]):
+        raise ValueError(f"Got non-ExceptionType in exceptions arguments: {[t[0] for t in zip(exceptions,invalid_excepts) if t[1]==1]}")
+
+    def _replace(string: str, replacer: dict[str,str]):
+        for replace in replacer:
+            string = string.replace(replace, replacer[replace])
+        print("returning final string",string)
+        return string
+
+    def _add_notes(err: Exception, checker: dict[str,str]):
+        for string in checker:
+            if string in err.args[0]:
+                err.add_note(checker[string])
+        return err
+
+    if not exceptions:
+        exceptions = Exception
+    try:
+        yield # You can return something if you want, that gets picked up in the 'as'
+    except exceptions as err:
+        err.args = ((f"{prepend_msg}{_replace(arg,replace)}{append_msg}" if i == 0 else arg) for i,arg in enumerate(err.args))
+        raise _add_notes(err, notes)
+    finally:
+        pass
+
+VALID_MODEL_TYPES = get_models()
+
+
+class ModelInfo:
+    """Info on a model, instantiated by ``model`` (later retrievable as attribute), or instantiated using the ``from_database`` class method
+    
+    Attributes: ``pca_method``, ``pca_components``, ``pca_random_seed`` & ``dt_correcting``
+
+    Methods: ``get_and_check_transformer``
+    """
+    model: mlflow.pyfunc.PyFuncModel
+    version: int
+    pca_method: PCA|TruncatedSVD
+    pca_components: int
+    pca_random_seed: int
+    dt_correcting: bool
+
+    def __init__(self, model: mlflow.pyfunc.PyFuncModel):
+        pca_method = model.metadata.metadata.get("PCA method", "sklearn.decomposition.PCA")
+        if pca_method == (pca_method_name := "sklearn.decomposition.PCA"):
+            pca_method = PCA
+        elif pca_method == (pca_method_name := "sklearn.decomposition.TruncatedSVD"):
+            pca_method = TruncatedSVD
+        elif pca_method is None:
+            pass
+        else:
+            raise ValueError(f"Unknown PCA decomposition method '{pca_method}' found in model, known methods are 'sklearn.decomposition.PCA' and 'sklearn.decomposition.TruncatedSVD'")
+        try:
+            dt_correcting = bool(model.metadata.metadata.get("dT correcting", 0))  # Whether the model predicts a correction to dT or whole new value
+            pca_random_seed = model.metadata.metadata.get("PCA random seed", None)
+            pca_components = int(model.metadata.signature.inputs.inputs[0].shape[-1])
+        except Exception as err:
+            valerr = ValueError("Failed to create ModelInfo")
+            raise err from valerr
+        self.model = model
+        self.model_name = "<Unknown>"
+        self.version = None
+        self.pca_method = pca_method
+        self._pca_method_name = "'"+pca_method_name+"'" if pca_method else None
+        self.pca_components = pca_components
+        self.pca_random_seed = pca_random_seed
+        self.dt_correcting = dt_correcting
+    
+    def get_transformer(self) -> PCA|TruncatedSVD:
+        """Gets transformer model (PCA or TruncatedSVD) from model parameters"""
+        return self.pca_method(self.pca_components, random_state=self.pca_random_seed) if self.pca_method else None
+
+    def check_transformer(self, PCA_fit: PCA|TruncatedSVD|None) -> PCA|TruncatedSVD|None:
+        """Checks validity of passed transformer agains model parameters, then returns it"""
+        if isinstance(PCA_fit, (PCA,TruncatedSVD)) and not isinstance(PCA_fit, self.pca_method):
+            raise ValueError(f"Expected {self.pca_method if self.pca_method else 'no PCA method'}, but got PCA_fit: {PCA_fit}")
+        elif isinstance(PCA_fit, (PCA,TruncatedSVD)):
+            if not getattr(PCA_fit,"n_samples_",False):
+                raise ValueError(f"PCA_fit was not yet fitted, got unfitted {PCA_fit}")
+            return PCA_fit
+        elif PCA_fit is None and self.pca_method is None:
+            return PCA_fit
+        else:
+            raise ValueError(f"Unknown PCA decomposition method '{PCA_fit}' passed to PCA_fit, known methods are 'sklearn.decomposition.PCA' and 'sklearn.decomposition.TruncatedSVD'")
+    
+    @classmethod
+    def from_database(self, model_name: str, model_version: int) -> "ModelInfo":
+        replacer = {f"Model Version (name={model_name}, version={model_version}) not found": "Unknown model version",
+                    f"Registered Model with name={model_name} not found": "Invalid model name",
+                    "RESOURCE_DOES_NOT_EXIST: ": ""}
+        notes = {"Invalid model name": f"Valid model names are: {', '.join(VALID_MODEL_TYPES)}"}
+        with modify_message(prepend_msg=f"Failed to load {model_name} v{model_version}: ", replace=replacer, notes=notes):
+            regressor = mlflow.pyfunc.load_model(model_uri=f"models:/{model_name}/{model_version}")
+        modelinfo = ModelInfo(regressor)
+        modelinfo.model_name, modelinfo.version = model_name,model_version
+        return modelinfo
+    
+    def __str__(self):
+        title = f"ModelInfo for {self.model_name} {'v'+str(v) if (v:=self.version) else ''}"
+        bar = "="*42  # Answer to everything
+        model_info = "MLFlow info:\n "+f"{self.model}".rstrip()
+        pca_str = f"PCA method: {self._pca_method_name}\nPCA components: {self.pca_components}\nPCA random seed: {self.pca_random_seed}" if self.pca_method else "<No PCA method>"
+        dt_correcting_str = f"Is dt correcting: {self.dt_correcting}"
+        return "\n".join([title,bar,model_info,pca_str,dt_correcting_str])+"\n"
+
 
 def print_warnings(warning_format: str = "[WARNING] <TyPe>: <Message>"):
     """Catches all warnings that the function execution raises and prints them according to `warning_format`
 
-    Follows the capitalization of <type> and <message>, e.g. "UserWarning: test warning!" with format "[<TYPE>]
-    <Message>" will be printed as "[USERWARNING] Test warning!"
+    Follows the capitalization of \\<type\\> and \\<message\\>, e.g. "UserWarning: test warning you CANNOT miss!" with format "[\\<TYPE\\>]
+    \\<Message\\>" will be printed as "[USERWARNING] Test warning you CANNOT miss!"
     """
     if not isinstance(warning_format, str):
         raise TypeError("warning_format must be a string")
@@ -39,7 +161,10 @@ def warn_wrapper(wrapped: Callable, warning_format: str):
         for k,v in replacer.items():
             for stringmethod in ["lower","upper","capitalize"]:
                 if k and k[1:-1] == k[1:-1].__getattribute__(stringmethod)():
-                    replacer[k] = v.__getattribute__(stringmethod)()
+                    if stringmethod == "capitalize":
+                        replacer[k] = v.upper()[:1]+v[1:]
+                    else:
+                        replacer[k] = v.__getattribute__(stringmethod)()
             formatter = formatter.replace(k,replacer[k]) if k else formatter
         return formatter
 
@@ -159,7 +284,7 @@ def train_model(model, data, labels, label_weights=None, force_train = False):
         # dtrain = xgb.DMatrix(X_train, label=y_train, missing=np.NaN)
         model.fit(data, labels)
     return model
-    
+
 def predict(model, data):
     """Universal output format for each model type prediction"""
     if (m_type := model_type(model)) in ["SKLearnNN", "XGBTree"]:
@@ -217,8 +342,10 @@ def loggable_model_metrics(fitted_model, data_test, labels_test):
         raise ValueError(f"Model type not recognized: '{m_type}'")
 
 @print_warnings()
-def log_model(fitted_model, d_train: np.ndarray, predicted_train: np.ndarray, PCA_seed: int, PCA_method: str) -> model.ModelInfo:
-    """Model type agnostic logging function for MLFlow. Can log keras' Sequential NN model, xgboost's XGBoostedTree and sklearn's MLPRegressorModel"""
+def log_model(fitted_model, d_train: np.ndarray, predicted_train: np.ndarray, PCA_seed: int, PCA_method: str, dT_correcting: bool = False) -> model.ModelInfo:
+    """Model type agnostic logging function for MLFlow. Can log keras' Sequential NN model, xgboost's XGBoostedTree and sklearn's MLPRegressorModel
+    
+    INFO: predicted_train is only used to infer the function signature (so not fully logged)"""
     if (m_type := model_type(fitted_model)) == "SKLearnNN":
         return mlflow.sklearn.log_model(
             sk_model=fitted_model,
@@ -227,7 +354,8 @@ def log_model(fitted_model, d_train: np.ndarray, predicted_train: np.ndarray, PC
             input_example=d_train[:1],
             registered_model_name="MLPRegressorModel",
             metadata={"PCA random seed": PCA_seed,
-                      "PCA method": PCA_method}
+                      "PCA method": PCA_method,
+                      "dT correcting": dT_correcting}
         )
     elif m_type == "XGBTree":
         return mlflow.xgboost.log_model(
@@ -237,7 +365,8 @@ def log_model(fitted_model, d_train: np.ndarray, predicted_train: np.ndarray, PC
             input_example=d_train[:1],
             registered_model_name="XGBoostedTree",
             metadata={"PCA random seed": PCA_seed,
-                      "PCA method": PCA_method},
+                      "PCA method": PCA_method,
+                      "dT correcting": dT_correcting}
         )
     elif m_type == "KerasNN":
         return mlflow.keras.log_model(
@@ -247,7 +376,8 @@ def log_model(fitted_model, d_train: np.ndarray, predicted_train: np.ndarray, PC
             input_example=d_train[:1],
             registered_model_name=fitted_model.name,
             metadata={"PCA random seed": PCA_seed,
-                      "PCA method": PCA_method}
+                      "PCA method": PCA_method,
+                      "dT correcting": dT_correcting}
         )
     else:
         raise ValueError(f"Model type not recognized: '{m_type}'")

@@ -43,16 +43,21 @@ def create_test_sets(test_set_ranges: list[int],
     else:
         return test_sets
 
-def get_test_set_results(test_sets: dict[str, pd.DataFrame], pca_model, regressor) -> tuple[dict[str,float],dict[str,go.Figure]]:
+def get_test_set_results(test_sets: dict[str, pd.DataFrame], pca_model: PCA, regressor, dT_correcting: bool = False) -> tuple[dict[str,float],dict[str,go.Figure]]:
+    """Gets test set results for a given dict of test_sets, a fitted PCA model & a regressor"""
     x_to_t = lambda x: 160-(x*4)
     uniform_metrics = {}
     uniformity_artifacts = {}
     for k,df in test_sets.items():
-        data_trans = pca_model.transform(df.values.transpose())
+        data_trans = pca_model.transform(df.T.values) if pca_model else df.T.values
         s_labels_t = pd.Series(np.array([float([s[s.find("Tref")+4:s.find(",dT")] for s in [col.replace(" ","")]][0]) for col in df.columns]))
+        labels_dt = 0*s_labels_t
+        if dT_correcting:
+            labels_dt = np.array([float([s[s.find(",dT")+3:s.find(",E")] for s in [col.replace(" ","")]][0]) for col in df.columns])
+            s_labels_ref_dt = pd.Series(labels_dt - s_labels_t.values,name="dT - Tref")
         s_labels_t.name = f"Initial data: Tref"
-        pred_s_test = pd.Series(s_labels_t - x_to_t(predict(regressor, data_trans)),name=f"Tref - Tpred (test, E<{k})")
-        hist = histogram(pd.concat([s_labels_t,pred_s_test], axis=1), [-30,30,0.25], title="Arrival Time Histogram", xaxis_title="Time (ns)", yaxis_title="Prevalence")
+        pred_s_test = pd.Series(x_to_t(predict(regressor, data_trans)) - s_labels_t + labels_dt,name=f"Tpred - Tref (test, E\u2208{k})")
+        hist = histogram(pd.concat([s_labels_t,pred_s_test]+([s_labels_ref_dt] if dT_correcting else []), axis=1), [-30,30,0.25], title="Arrival Time Histogram", xaxis_title="Time (ns)", yaxis_title="Prevalence")
         uniformity_artifacts[f"PredictionHistogramE{k[1:-1].replace(', ','-')}"] = hist
         uniform_metrics[f"Uniform test FWHM E{k[1:-1].replace(', ','-')}"] = 2*np.sqrt(2*np.log(2)) * hist._params[pred_s_test.name+" Gaussian"]["sigma"]
     return uniform_metrics, uniformity_artifacts
@@ -70,6 +75,7 @@ def run_experiment(data: pd.DataFrame,
                    remove_nan_waveforms: bool = False,
                    pca_components: int = 64,
                    pca_method: PCA|TruncatedSVD = PCA,
+                   dT_correcting: bool = False,
                    return_regressor: bool = False,
                    uniform_test_set: list[int] = [],
                    test_size: float = 0.5,
@@ -124,7 +130,7 @@ def run_experiment(data: pd.DataFrame,
                                              include_energy=include_energy,
                                              select_channels=select_channels,
                                              limit="smallest")
-                print(f"[MLFlow run] Created uniform test sets of length {len(test_sets.values()[0].columns)} in energy (arb. unit) ranges:",test_ranges)
+                print(f"[MLFlow run] Created uniform test sets of length {len(list(test_sets.values())[0].columns)} in energy (arb. unit) ranges:",test_ranges)
         av_len = None
     else:
         if uniform_test_set:
@@ -143,18 +149,32 @@ def run_experiment(data: pd.DataFrame,
 
     # Get labels
     available_length = av_len or get_waveforms(source_data=data, get_indices_map=False, select_channels=select_channels).shape[1]
-    data = data_df.values.transpose()
-    labels_t = np.array([float([s[s.find("Tref")+4:s.find(",dT")] for s in [col.replace(" ","")]][0]) for col in data_df.columns])
+    if any([["-" == s[s.find(",dT")+3:s.find(",E")] for s in [col.replace(" ","")]][0] for col in data_df.columns]) and dT_correcting is True:
+        raise ValueError(f"Found no dT labels in the given data, while this is required for training a dT correcting model")
+    elif dT_correcting is True:
+        labels_dt = np.array([float([s[s.find(",dT")+3:s.find(",E")] for s in [col.replace(" ","")]][0]) for col in data_df.columns])
+        labels_t = np.array([float([s[s.find("Tref")+4:s.find(",dT")] for s in [col.replace(" ","")]][0]) for col in data_df.columns]) - labels_dt
+    elif dT_correcting is False:
+        labels_t = np.array([float([s[s.find("Tref")+4:s.find(",dT")] for s in [col.replace(" ","")]][0]) for col in data_df.columns])
+    else:
+        raise ValueError(f"dT_correcting argument must be either True or False, not {dT_correcting}")
     labels_x = t_to_x(labels_t)
     wave_i = np.array([int(col[col.find("[")+1:col.find("]")]) for col in data_df.columns])
 
     # Transform the data (PCA)
-    pca_method_str = pca_method.__module__[:pca_method.__module__.rfind(".")+1]+pca_method.__qualname__
-    PCA_seed = round((592138171 * (datetime.now().timestamp()*9732103 % 38045729)) % 3244034593)
-    model: PCA = pca_method(pca_components, random_state=PCA_seed)
-    data_trans = model.fit_transform(data)
-    pca_var_ratio = model.explained_variance_ratio_
-    # print("pca_var_ratio:",pca_var_ratio)
+    if pca_components is None or pca_components == len(data_df): # Leave data as is when PCA components is None or data length
+        print("[MLFlow run] Got PCA components equal to data dimension, skipping transform...")
+        data_trans = data_df.T.values
+        PCA_seed = pca_method_str = model = None
+    else:                              # Otherwise raise error (components > data length) or fit and transform
+        try:
+            pca_method_str = pca_method.__module__[:pca_method.__module__.rfind(".")+1]+pca_method.__qualname__
+            PCA_seed = round((592138171 * (datetime.now().timestamp()*9732103 % 38045729)) % 3244034593)
+            model: PCA = pca_method(pca_components, random_state=PCA_seed)
+            data_trans = model.fit_transform(data_df.T.values)
+            pca_var_ratio = model.explained_variance_ratio_
+        except Exception as e:
+            raise ValueError(f"Failed to fit and transform waveform data with PCA method '{pca_method_str}': {e}") from e
 
     # Create a conditioned train-test split on the data, with data not passing the condition added to the testing set
     d_train, d_test, l_train, l_test, l_train_t, l_test_t, wi_train, wi_test = train_test_split_cond(data_trans, labels_x, labels_t, wave_i, test_size=test_size, 
@@ -196,21 +216,21 @@ def run_experiment(data: pd.DataFrame,
         # Combining labels and creating prediction Series
         s_labels_t = pd.Series(np.append(l_train_t,l_test_t))
         shift = -round(s_labels_t.apply(lambda x: round(x)).mode().iloc[0])
-        s_labels_t.name = f"Initial data: Tref {'-' if shift < 0 else '+'} {abs(shift)} ns"
+        s_labels_t.name = f"Initial data: Tref {'- dT' if dT_correcting else ''}{'-' if shift < 0 else '+'} {abs(shift)} ns"
         predicted_train = predict(regr, d_train)
-        pred_s_train = pd.Series(l_train_t - x_to_t(predicted_train),name="Tref - Tpred (train)")
-        pred_s_test = pd.Series(l_test_t - x_to_t(predict(regr, d_test)),name="Tref - Tpred (test)")
-
+        pred_s_train = pd.Series(x_to_t(predicted_train) - l_train_t,name="dT + Tcorr - Tref (train)" if dT_correcting else "Tpred - Tref (train)")
+        pred_s_test = pd.Series(x_to_t(predict(regr, d_test)) - l_test_t,name="dT + Tcorr - Tref (test)" if dT_correcting else "Tpred - Tref (test)")
+        
         # Add histogram with predicted vs actual data
         fig_hist = histogram(pd.concat([s_labels_t+shift,pred_s_train,pred_s_test], axis=1), [-30,30,0.25], title="Arrival Time Histogram", xaxis_title="Time (ns)", yaxis_title="Prevalence")
-        print(f"[MLFlow run] Created histogram with params: {fig_hist._params}")
+        print("[MLFlow run] Created histogram with params: "+str(fig_hist._params).replace('\n','').replace('       '," ").replace("  "," "))
         fwhm_train = 2*np.sqrt(2*np.log(2)) * fig_hist._params[pred_s_train.name+" Gaussian"]["sigma"]
         fwhm_test = 2*np.sqrt(2*np.log(2)) * fig_hist._params[pred_s_test.name+" Gaussian"]["sigma"]
         overtraining_factor = fwhm_test / fwhm_train
 
         # Get fwhm from the uniform test sets
-        uniform_metrics, uniformity_artifacts = get_test_set_results(test_sets=test_sets, pca_model=model, regressor=regr)
-        print(f"[MLFlow run] Got FWHMs for test set bounds {test_ranges}: {uniform_metrics}")
+        uniform_metrics, uniformity_artifacts = get_test_set_results(test_sets=test_sets, pca_model=model, regressor=regr, dT_correcting=dT_correcting)
+        print(f"[MLFlow run] Got FWHMs for test set bounds {test_ranges}: {list(uniform_metrics.values())}")
 
         # Log all parameters, figures, metrics and inputs
         mlflow.set_experiment_tag("BaseModel","SKLearn Neural Network MLPRegressor")
@@ -230,6 +250,7 @@ def run_experiment(data: pd.DataFrame,
             "PCA components": pca_components,
             "PCA random seed": PCA_seed,
             # "PCA explained variance": pca_var_ratio,
+            "dT correcting": dT_correcting,
         } | loggable_model_params(regr))
         print(f"[MLFlow run] Logged parameters")
         mlflow.log_figure(fig_hist, "PredictionHistogram.html")
@@ -251,9 +272,7 @@ def run_experiment(data: pd.DataFrame,
             "Train RMS": pred_s_train.std(),
             "Test mean": pred_s_test.mean(),
             "Test RMS": pred_s_test.std()
-        } | loggable_model_metrics(regr, d_test, l_test) | {
-            k:str(v) for k,v in uniform_metrics.items()
-        })
+        } | loggable_model_metrics(regr, d_test, l_test) | uniform_metrics)
         print(f"[MLFlow run] Logged metrics")
         mlflow.log_input(dataset_train, context="training")
         mlflow.log_input(dataset_test, context="testing")
@@ -261,7 +280,12 @@ def run_experiment(data: pd.DataFrame,
 
         # Log the model and finish run
         now = datetime.now()
-        model_info = log_model(regr, d_train, predicted_train, PCA_seed, pca_method_str)
+        model_info = log_model(fitted_model=regr,
+                               d_train=d_train,
+                               predicted_train=predicted_train,
+                               PCA_seed=PCA_seed,
+                               PCA_method=pca_method_str,
+                               dT_correcting=dT_correcting)
         print(f"[MLFlow run] Logged model in {datetime.now()-now}. Run '{run_name}' finished (run ID: {mlflow_run.info.run_id})")
     if return_regressor:
         return fig_hist, regr
