@@ -14,19 +14,45 @@ from gewapro.functions import gaussian, gaussian_arr, inverse_quadratic, inverse
 from sklearn.decomposition import PCA, TruncatedSVD
 from gewapro.preprocessing import get_waveforms
 from gewapro.cache import cache
-from gewapro.util import stats, join_strings, pandas_string_rep, add_notes
+from gewapro.util import stats, join_strings, pandas_string_rep, add_notes, name_to_vals
+
+PLOT_SETTINGS = {"show_dt":True, "show_pred":True, "which": "Tfit", "default_plot_mode": "Bar", "show_progess_bar": False}
+os.environ['MLFLOW_ENABLE_ARTIFACTS_PROGRESS_BAR'] = "False"
+
+def settings(**new_settings):
+    """Update or show the plot settings"""
+    global PLOT_SETTINGS
+    try:
+        updated_settings = {setting:value for setting,value in new_settings.items() if PLOT_SETTINGS[setting] != value}
+        if updated_settings.get("default_plot_mode","bar") not in ["Bar", "Line", "bar", "line"]:
+            raise ValueError(f"default_plot_mode must be 'Bar' or 'Line', got '{updated_settings['default_plot_mode']}'")
+        if updated_settings.get("show_progess_bar", False) not in [True, False]:
+            raise ValueError(f"show_progess_bar must be bool")
+    except KeyError as e:
+        raise add_notes(ValueError("Could not update settings due to invalid setting: "+str(e)), f"Valid settings are: "+", ".join(list(PLOT_SETTINGS.keys()))) from e
+    if new_settings.get("show_progess_bar", False) is True:
+        os.environ['MLFLOW_ENABLE_ARTIFACTS_PROGRESS_BAR'] = "True"
+    elif new_settings.get("show_progess_bar", True) is False:
+        os.environ['MLFLOW_ENABLE_ARTIFACTS_PROGRESS_BAR'] = "False"
+    PLOT_SETTINGS |= new_settings
+    if updated_settings:
+        print("[GeWaPro][plotting.settings] Updated plot settings: "+", ".join([f"{s} = {v}" for s,v in updated_settings.items()]))
+    else:
+        print("[GeWaPro][plotting.settings] Settings not changed: "+", ".join([f"{s} = {v}" for s,v in PLOT_SETTINGS.items()]))
+    return PLOT_SETTINGS
 
 def histogram(data: pd.DataFrame|pd.Series,
               bins: list[int] = None,
               warnings: Literal["raise","print","ignore"] = "print",
               add_fits: list[str] = ["Gaussian"],
+              mode: Literal["Bar","Line"] = "DEFAULT",
               **options):
     """Returns a histogram with one (Series) or more (DataFrame) traces with fitted Gaussians, with ``options`` kwargs passed to the traces"""
     if not isinstance(warnings, str):
         raise ValueError("warnings must be a string")
     if len(data) == 0 and warnings != "raise":
         if warnings != "ignore":
-            print("[WARNING] Got empty data, nothing to plot")
+            print("[WARNING][GeWaPro][plotting.histogram] Got empty data, nothing to plot")
         return go.Figure()
     elif len(data) == 0:
         raise ValueError("Got empty data, nothing to plot")
@@ -43,11 +69,12 @@ def histogram(data: pd.DataFrame|pd.Series,
             raise ValueError(f"Invalid bins provided: {bins}. Bins must be a 3-long number list [start,end,step] where start must be after end and step must be smaller than start-end interval")
         bins = [data.min().min(), data.max().max(), (data.max().max() - data.min().min()) // 100]
         if warnings != "ignore":
-            print(f"[WARNING] No (valid) bins provided, assuming start {bins[0]:.0f}, end {bins[1]:.0f} and step {bins[2]}")
+            print(f"[WARNING][GeWaPro][plotting.histogram] No (valid) bins provided, assuming start {bins[0]:.0f}, end {bins[1]:.0f} and step {bins[2]}")
     if not add_fits:
         add_fits = []
     elif not isinstance(add_fits, list) or any([fit_name not in ["Gaussian","Inv. Quadratic"] for fit_name in add_fits]):
         raise ValueError("add_fits must be a list containing 'Gaussian' and/or 'Inv. Quadratic'")
+    mode = PLOT_SETTINGS["default_plot_mode"] if mode.lower() == "default" else mode
     fig = go.Figure()
     options = {"xaxis_range":[bins[0],bins[1]]} | options
     title = options.pop("title","Histogram")
@@ -68,16 +95,32 @@ def histogram(data: pd.DataFrame|pd.Series,
         # print("bin bounds:", bins[0:1], "nearest_x_bins:", nearest_x_bins, "\n", x_data[nearest_x_bins[0]], x_data[nearest_x_bins[1]])
         data_count = np.array([1.0]*len(data))
         y_data = np.array([data_count[(trace_data >= x-bins[2]/2) & (trace_data < x+bins[2]/2)].sum() for x in x_data])
-        fig.add_trace(go.Bar(x=x_data,
-                             y=y_data,
-                             marker={"line":{"width":0}},
-                             width=bins[2],
-                             name=trace_names[i] or col,
-                             marker_color=colors[i],
-                             customdata=pd.DataFrame(data=[x_data_s,x_data_e]).T,
-                             hovertemplate ='<b>[%{customdata[0]:.2f},%{customdata[1]:.2f}): %{y:.0f}x</b>',
-                            **options,
-                            ))
+        if mode.lower() == "bar":
+            fig.add_trace(go.Bar(x=x_data,
+                                 y=y_data,
+                                 marker={"line":{"width":0}},
+                                 width=bins[2],
+                                 name=trace_names[i] or col,
+                                 marker_color=colors[i],
+                                 customdata=pd.DataFrame(data=[x_data_s,x_data_e]).T,
+                                 hovertemplate ='<b>[%{customdata[0]:.2f},%{customdata[1]:.2f}): %{y:.0f}x</b>',
+                                **options,
+                                ))
+        elif mode.lower() == "line":
+            fig.add_trace(go.Scatter(x=x_data,
+                                     y=y_data,
+                                     marker={"line":{"width":0}},
+                                     mode="lines",
+                                     line_shape="hvh",
+                                     name=trace_names[i] or col,
+                                     line_color=colors[i],
+                                     marker_color=colors[i],
+                                     customdata=pd.DataFrame(data=[x_data_s,x_data_e]).T,
+                                     hovertemplate ='<b>[%{customdata[0]:.2f},%{customdata[1]:.2f}): %{y:.0f}x</b>',
+                                    **options,
+                                ))
+        else:
+            raise ValueError(f"Got invalid mode (must be either \"Line\" or \"Bar\"): {mode}")
         for fit_name,fit_func in {"Gaussian":gaussian,"Inv. Quadratic":inverse_quadratic}.items():
             if fit_name not in add_fits:
                 continue
@@ -89,7 +132,7 @@ def histogram(data: pd.DataFrame|pd.Series,
                     warns.simplefilter("always")
                     popt, pcov = curve_fit(fit_func, x_data, y_data, p0 = p0)
                     if len(w) > 0 and issubclass(w[-1].category, OptimizeWarning) and warnings != "ignore":
-                        print(f"[WARNING] {fit_name} fit optimization failed for initial guess [A,\u03BC,\u03C3] = {p0}: OptimizeWarning: {w[-1].message}")
+                        print(f"[WARNING][GeWaPro][plotting.histogram] {fit_name} fit optimization failed for initial guess [A,\u03BC,\u03C3] = {p0}: OptimizeWarning: {w[-1].message}")
                 min_tb,max_tb = popt[1]-5*popt[2], popt[1]+5*popt[2]
                 ksh = kstest(trace_data[(trace_data > min_tb) & (trace_data < max_tb)],cdf=norm.cdf,args=(popt[1],0.5*popt[2])).pvalue
                 ks1 = kstest(trace_data[(trace_data > min_tb) & (trace_data < max_tb)],cdf=norm.cdf,args=(popt[1],popt[2])).pvalue
@@ -98,17 +141,19 @@ def histogram(data: pd.DataFrame|pd.Series,
                     zip(fit_func.__code__.co_varnames[1:fit_func.__code__.co_argcount+fit_func.__code__.co_kwonlyargcount], popt, strict=True)
                 ) | {"Covariance": pcov, "GoodnessOfFit": 0 if ((nom:=ksd*ksh) <= 0) else 1/np.log((ks1*ks1)/nom)}
                 fig.add_trace(go.Scatter(x=x_data,
-                                        y=fit_func(x_data, *popt),
-                                        line_color=fig.data[2*i].marker.color,
-                                        name=f"{fit_name} fit",
-                                        hovertemplate = "<b>(%{x},%{y})</b>"+
-                                            f'<br>\u03BC: {popt[1]:.4f}<br>\u03C3: {popt[2]:.4f}'+   # mu (popt[1]), sigma (popt[2])
-                                            f'<br>Ampl.: {popt[0]/(popt[2]*np.sqrt(2*np.pi)):.2f}<br><b>FWHM: {popt[2]*2*np.sqrt(2*np.log(2)):.4f}</b>',
-                                        **fit_options
+                                         y=fit_func(x_data, *popt),
+                                         line_color=fig.data[2*i].marker.color,
+                                         line_dash="dot",
+                                         line_shape="spline",
+                                         name=f"{fit_name} fit",
+                                         hovertemplate = "<b>(%{x},%{y})</b>"+
+                                             f'<br>\u03BC: {popt[1]:.4f}<br>\u03C3: {popt[2]:.4f}'+   # mu (popt[1]), sigma (popt[2])
+                                             f'<br>Ampl.: {popt[0]/(popt[2]*np.sqrt(2*np.pi)):.2f}<br><b>FWHM: {popt[2]*2*np.sqrt(2*np.log(2)):.4f}</b>',
+                                         **fit_options
                                         ))
             except Exception as e:
                 if warnings == "print":
-                    print(f"[WARNING] {fit_name} fitting failed: {e.__class__.__name__}: {e}")
+                    print(f"[WARNING][GeWaPro][plotting.histogram] {fit_name} fitting failed: {e.__class__.__name__}: {e}")
                 elif not warnings in ["ignore","print"]:
                     raise e
 
@@ -128,7 +173,7 @@ def energy_scatter_plot(data: pd.DataFrame|pd.Series,
     """
     if len(data) == 0 and warnings != "raise":
         if warnings != "ignore":
-            print("[WARNING] Got empty data, nothing to plot")
+            print("[WARNING][GeWaPro][plotting.energy_scatter_plot] Got empty data, nothing to plot")
             return go.Figure()
     elif len(data) == 0:
         raise ValueError("Got empty data, nothing to plot")
@@ -199,6 +244,8 @@ def plot_predictions(on_data: str,
                      PCA_fit: str|PCA|TruncatedSVD = "self",
                      plot: Literal["Histogram","EnergyScatter",False] = "Histogram",
                      custom_func: Callable = None,
+                     which: Literal["T0","Tfit"] = None,  #Default Tfit
+                     shift: float = 1.0,
                     **kwargs) -> go.Figure:
     """Fetches fitted model (with name ``model_name`` & version ``model_version``) and predicts ``on_data`` provided from the ``data_dict`` within ``energy_range``
     
@@ -206,23 +253,31 @@ def plot_predictions(on_data: str,
     performs the PCA fitting on the DataFrame indexed by this string in the data_dict (``data_dict[PCA_fit]``). If given as a fitted PCA or TruncatedSVD
     instance, uses this instance directly to perform the transformation on (recommended; fastest for time-consuming fitting).
     - The ``custom_func`` argument takes the untransformed input dataframe and adds its output to the prediction series.
+    - The ``shift`` argument determines if and how far the initial data is shifted. If 0, no shift is applied; if 1, shifts fully towards the mode;
+    if 0.5, shifts halfway towards the mode.
+    - The ``which`` argument gets Tfit or T0 from model by default, then uses which setting if not found in model metadata.
+    - Extra keyword arguments ``show_dt`` & ``show_pred`` may be given to modify what traces are shown/hidden
+    - Any remaining keyword arguments passable to Histogram or EnergyScatter will be passed there (e.g. ``bins``, ``mode``, ...)
     """
     x_to_t = lambda x: 160-(x*4)
     t_to_x = lambda t: (160-t)/4
     func = custom_func or (lambda on_data_df: np.zeros(on_data_df.iloc[0].transpose().shape))
 
     # Get regressor and PCA data in right format
-    modelinfo = ModelInfo.from_database(model_name, model_version)
+    modelinfo: ModelInfo = ModelInfo.from_database(model_name, model_version)
     regressor, dt_correction_mode, pca_method, pca_components = modelinfo.model, modelinfo.dt_correcting, modelinfo.pca_method, modelinfo.pca_components
     if isinstance(PCA_fit, str):
         pca_model = modelinfo.get_transformer()
     else:
         pca_model = modelinfo.check_transformer(PCA_fit)
+    global PLOT_SETTINGS
+    which = ({"which":modelinfo.which or PLOT_SETTINGS["which"]} | ({"which":which} if which else {}))["which"]
     dfs: dict[str,pd.DataFrame] = {}
     include_energy = kwargs.pop("include_energy",False)
+    show_pred = kwargs.pop("show_pred",PLOT_SETTINGS["show_pred"])
     for string in ([on_data,PCA_fit] if isinstance(PCA_fit, str) else [on_data]):
         if "raw" in string:
-            print("Found 'raw' string in data name, so using the data directly (no waveform getting)...")
+            print("[GeWaPro][plotting.plot_predictions] Found 'raw' string in data name, so using the data directly (no waveform getting)...")
             dfs[string] = data_dict[string]
         elif string == "self" and string != on_data:
             dfs[string] = dfs[on_data]
@@ -237,49 +292,54 @@ def plot_predictions(on_data: str,
     #     raise ValueError("The data to perform the PCA transform on must always contain all the waveforms from the prediction data set")
 
     # Get labels
-    try:
-        get_dt_labels = False if any([["-" == s[s.find(",dT")+3:s.find(",E")] for s in [col.replace(" ","")]][0] for col in dfs[on_data].columns]) else True
-    except:
-        get_dt_labels = False
+    get_dt_labels = False
+    if kwargs.pop("show_dt",PLOT_SETTINGS["show_dt"]):
+        try:
+            get_dt_labels = False if any(["-" == name_to_vals(col)["dT"] for col in dfs[on_data].columns]) else True
+        except:
+            pass
     if dt_correction_mode and not get_dt_labels:
         raise add_notes(ValueError(f"Found no dT labels in the given data, while this is required for dT correcting model \"{model_name} v{model_version}\". Try a different model, or add the labels to the data"),"Provided data: "+pandas_string_rep(dfs[on_data]))
     try:
-        labels_t = np.array([float([s[s.find("Tref")+4:s.find(",dT")] for s in [col.replace(" ","")]][0]) for col in dfs[on_data].columns])
+        labels_t = np.array([name_to_vals(col)[which] for col in dfs[on_data].columns])
         if get_dt_labels:
-            labels_dt = np.array([float([s[s.find(",dT")+3:s.find(",E")] for s in [col.replace(" ","")]][0]) for col in dfs[on_data].columns])
-            s_labels_ref_dt = pd.Series(labels_dt - labels_t,name="dT - Tref")
+            labels_dt = np.array([name_to_vals(col)["dT"] for col in dfs[on_data].columns])
+            s_labels_ref_dt = pd.Series(labels_dt,name=f"dT")
         else:
             labels_dt = 0*labels_t
-        s_labels_t = pd.Series(labels_t, name="labels Tref")
-        s_labels_E = pd.Series(np.array([float([s[s.find("E")+1:] for s in [col.replace(" ","")]][0]) for col in dfs[on_data].columns]), name="Initial data")
+        s_labels_t = pd.Series(labels_t, name=f"labels {which}")
+        s_labels_E = pd.Series(np.array([name_to_vals(col)["E"] for col in dfs[on_data].columns]), name="Initial data")
     except Exception as e:
         e.add_note(f"Failed to create labels for columns: {list(dfs[on_data].columns)[:3]}...")
         raise e
     labels_x = t_to_x(s_labels_t.values)
-    print(f"Predicting data ({on_data}) for regressor v{model_version} has shape:", dfs[on_data].shape, "with",pca_components,f"{pca_method.__name__} components (random state {pca_model.random_state}) and energy range",energy_range) if verbose else None
+    print(f"[GeWaPro][plotting.plot_predictions] Predicting data ({on_data}) for regressor v{model_version} has shape:", dfs[on_data].shape, "with",pca_components,f"{pca_method.__name__} components (random state {pca_model.random_state}) and energy range",energy_range) if verbose else None
 
     # (Fit and) transform the data
     time_before_pca = datetime.now()
     if isinstance(PCA_fit, str):
         data_trans = pca_model.fit(dfs[PCA_fit].T.values) if pca_model else dfs[PCA_fit].T.values
     data_trans = pca_model.transform(dfs[on_data].T.values) if pca_model else dfs[on_data].T.values
-    print("Finished PCA fitting and transformation, took",datetime.now() - time_before_pca) if verbose else None
+    print("[GeWaPro][plotting.plot_predictions] Finished PCA fitting and transformation, took",datetime.now() - time_before_pca) if verbose else None
 
     # Combining labels and creating prediction Series
-    shift = -round(s_labels_t.apply(lambda x: round(x)).mode().iloc[0])
-    s_labels_t.name = f"Initial data: Tref {'-' if shift < 0 else '+'} {abs(shift)} ns"
+    shift = -round(shift*s_labels_t.apply(lambda x: round(x)).mode().iloc[0]) if shift else 0
+    s_labels_t.name = f"Initial data: {which}"+(f"{' -' if shift < 0 else ' +'} {abs(shift)} ns" if shift else "")
     # display(pd.concat([pd.Series(regressor.predict(predict_on_data_trans),name="predicted x"),pd.Series(labels_x,name="labels x")],axis=1))
     time_before_pred = datetime.now()
-    predicted_s = pd.Series(x_to_t(predict(regressor,data_trans) + func(dfs[on_data])) + (dt_correction_mode*labels_dt) - labels_t,name="Tpred - Tref")
-    print("Finished prediction of regressor, took",datetime.now() - time_before_pred) if verbose else None
+    predicted_s_r = pd.Series(x_to_t(predict(regressor,data_trans) + func(dfs[on_data])) + (dt_correction_mode*labels_dt),name="Tpred")
+    predicted_s = predicted_s_r - labels_t
+    predicted_s.name = "Tpred - Tref"
+    print("[GeWaPro][plotting.plot_predictions] Finished prediction of regressor, took",datetime.now() - time_before_pred) if verbose else None
     if dt_correction_mode:
-        predicted_s.name = "dT + Tcorr - Tref" #predicted_s.name + " (dT + Tcorr - Tref)"
+        predicted_s.name = f"dT + Tcorr - {which}" #predicted_s.name + " (dT + Tcorr - Tref)"
 
     # Handling the creation and plotting of df_plot
     add_df = kwargs.pop("add_df",False)
     hist_kwargs = {"bins":[-30,30,0.25],"title":f"Prediction Histogram {model_name} v{model_version} on '{on_data}' E-range {energy_range}"} | kwargs
     scatter_kwargs = {"energy_map":s_labels_E} | kwargs
-    df_plot = pd.concat([s_labels_t+shift,predicted_s]+([s_labels_ref_dt] if get_dt_labels else []), axis=1)
+    df_plot = pd.concat([s_labels_t+shift,predicted_s]+([predicted_s_r] if show_pred else [])+([s_labels_ref_dt] if get_dt_labels else []), axis=1)
+    print("[GeWaPro][plotting.plot_predictions] Plot columns:",df_plot.columns) if verbose else None
     if plot is False:
         return df_plot
     elif isinstance(plot, str) and plot.lower() == "histogram":
@@ -303,12 +363,22 @@ def _fwhm_energy_df(on_data: str,
                    model_version: int,
                    data_dict: dict[str,pd.DataFrame],
                    model_name: str = "MLPRegressorModel",
-                   select_channels = 0,
+                   select_channels = [],
                    PCA_fit: str|PCA|TruncatedSVD = "self",
+                   which: Literal["T0","Tfit"] = None,
                    verbose: bool = False):
-    """Creates an energy DataFrame that can be used to ..."""
+    """Creates an energy DataFrame that can be used to plot FWHMs for different energy bins. It is strongly recommended to use fitted PCA models to increase computing time"""
     ranges = _get_ranges(start, end, step)
-    rename = lambda string: string[string.find(":")+2:string.find("-")-1] if ":" in string else string
+    def rename(string: str):
+        """Removes the shift and pretext from the column name"""
+        if ":" in string:
+            if "-" in string:
+                return string[string.find(":")+2:string.find("-")-1]
+            elif "+" in string:
+                return string[string.find(":")+2:string.find("+")-1]
+            return string[string.find(":")+2:]
+        return string
+    
     for e_range in ranges:
         fig_pred = plot_predictions(on_data=on_data,
                                     energy_range=e_range,
@@ -318,7 +388,8 @@ def _fwhm_energy_df(on_data: str,
                                     select_channels=select_channels,
                                     PCA_fit=PCA_fit,
                                     verbose=verbose,
-                                    add_df=True)
+                                    add_df=True,
+                                    which=which)
         results_df = stats(fig_pred._df)
         results_df.loc["FWHM",:] = [2*np.sqrt(2*np.log(2)) * fig_pred._params[col+" Gaussian"]["sigma"] for col in results_df.columns]
         results_df.loc["FWHM SD",:] = [2*np.sqrt(2*np.log(2)) * dict(zip((pars := fig_pred._params[col+" Gaussian"]).keys(), np.sqrt(np.diag(pars["Covariance"]))))["sigma"] for col in results_df.columns]
@@ -340,5 +411,5 @@ def _get_ranges(start: int, end: int, step: int, /):
 def _get_counts_for_bins(start: int, end: int, step: int, data_dict: dict, source_data: str, select_channels: list[int]):
     ranges = _get_ranges(start, end, step)
     data_plot = get_waveforms(source_data=data_dict[source_data], select_channels=select_channels)
-    s_labels_E = pd.Series(np.array([float([s[s.find("E")+1:] for s in [col.replace(" ","")]][0]) for col in data_plot.columns]))
+    s_labels_E = pd.Series(np.array([name_to_vals(col)["E"] for col in data_plot.columns]))
     return {f"{i:.0f}-{j:.0f}":((s_labels_E >= i) & (s_labels_E < j)).sum() for i,j in ranges}

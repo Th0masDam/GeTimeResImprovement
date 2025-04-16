@@ -43,31 +43,44 @@ def inverse_quadratic(x: float, a: float, x0: float, sigma: float):
     b = 3.37580799191/(sigma**2)
     return a*np.sqrt(b)/(np.pi*(1+b*(x-x0)**2))
 
-def var(s: pd.Series, which: Literal["+","-"]) -> float:
+def var(s: pd.Series, which: Literal["+","-"]|None = None) -> float:
+    """Variance of ``s``, which can be onesided ("-" or "+").
+    
+    NOTE: If ``s.mean()`` is in ``s``, 50% of this 0 variance will be
+    attributed to "+" and 50% to "-". For ``s`` of length ``N`` and each of the
+    variances of length ``N+`` for "+" and ``N-`` for "-", then ``N+/N * var(s,"+") + 
+    N-/N * var(s,"-") = var(s, None)``
+    """
     s_dif = (s - s.mean())
-    if which == "+":
-        s_pos = s[s_dif >= 0]
-        return s_pos.mean()
+    n_dif_zeroes = len(s_dif[s_dif == 0])
+    if which is None:
+        return (s_dif*s_dif).sum()/len(s)
+    elif which == "+":
+        s_oneside = s_dif[s_dif > 0]
     elif which == "-":
-        s_neg = -s[s_dif < 0]
-        return s_neg.mean()
+        s_oneside = s_dif[s_dif < 0]
     else:
         raise ValueError("which must be '+', '-' or None")
+    n_oneside = len(s_oneside) + 0.5*n_dif_zeroes
+    return (s_oneside*s_oneside).sum()/n_oneside
 
 def rmse(s: pd.Series, which: Literal["+","-"]|None = None) -> float:
+    """Root mean squared error, equivalent to ``np.sqrt(var(s))``, see ``var``"""
     s_dif = (s - s.mean())
+    n_dif_zeroes = len(s_dif[s_dif == 0])
     if which is None:
         return np.sqrt((s_dif*s_dif).sum()/len(s))
     elif which == "+":
-        s_pos = s[s_dif >= 0]
-        return np.sqrt((s_pos*s_pos).sum()/len(s))
+        s_oneside = s_dif[s_dif > 0]
     elif which == "-":
-        s_neg = s[s_dif < 0]
-        return np.sqrt((s_neg*s_neg).sum()/len(s))
+        s_oneside = s_dif[s_dif < 0]
     else:
         raise ValueError("which must be '+', '-' or None")
+    n_oneside = len(s_oneside) + 0.5*n_dif_zeroes
+    return np.sqrt((s_oneside*s_oneside).sum()/n_oneside)
 
 def calc_ab(line_511: int, line_1274: int) -> tuple[int,int]:
+    """Calculates the correction tuple with the 511 & 1274 line peaks"""
     a = (1274 - 511) / (line_1274 - line_511)
     b = 511 - a * line_511
     return a,b

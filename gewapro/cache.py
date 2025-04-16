@@ -4,7 +4,7 @@ import hashlib
 import inspect
 import pandas as pd
 from functools import partial
-from typing import Any, Callable, Dict, List, Tuple, NamedTuple
+from typing import Any, Callable, NamedTuple, Literal
 import re
 from gewapro.util import add_notes, pandas_string_rep
 
@@ -18,24 +18,24 @@ class CacheSetupError(ValueError):
     def __init__(self, *args):
         super().__init__(*args)
 
-class Empty:
-    """Empty instances are only equal to themselves, smaller than all else and may not have attributes"""
-    def __setattr__(self, name: str, value: Any) -> None:
-        raise ValueError("Empty object may not have attributes")
-    def __repr__(self):
-        return "Empty"
-    def __eq__(self, other):
-        if isinstance(other, Empty):
-            return True
-        return False
-    def __lt__(self, other):
-        return not self.__eq__(other)
-    def __gt__(self, other):
-        return False
-    def __le__(self, other):
-        return True
-    def __ge__(self, other):
-        return self.__eq__(other)
+# class Empty:
+#     """Empty instances are only equal to themselves, smaller than all else and may not have attributes"""
+#     def __setattr__(self, name: str, value: Any) -> None:
+#         raise ValueError("Empty object may not have attributes")
+#     def __repr__(self):
+#         return "Empty"
+#     def __eq__(self, other):
+#         if isinstance(other, Empty):
+#             return True
+#         return False
+#     def __lt__(self, other):
+#         return not self.__eq__(other)
+#     def __gt__(self, other):
+#         return False
+#     def __le__(self, other):
+#         return True
+#     def __ge__(self, other):
+#         return self.__eq__(other)
 
 class CacheInfo(NamedTuple):
     function: Callable
@@ -52,6 +52,7 @@ class CacheInfo(NamedTuple):
         return f"""CacheInfo for "{funcname}"
 =============={'='*len(funcname)}==
 Cache directory: {self.cache_dir}
+Verbose: {getattr(self.function,"verbose",True)}
 Ignored arguments: {self.ignore_args}
 Pre-cache function: {self.pre_cache}
 Post-cache function: {self.post_cache}
@@ -88,21 +89,21 @@ def _process_results(wrapped: Callable, kwargs: dict[str, Any], call_results: li
     return call_results[0]
 
 def _clear_cache(function_to_clear: Callable, cache_dir: str|os.PathLike) -> None:
-    def clear_cache(verbose: bool = False):
+    def clear_cache(verbose: bool|Literal["auto"] = "auto"):
         """Clears all cache for the function from `cache_dir` directory"""
         if not os.path.exists(cache_dir):
-            raise CacheError(f"Cache directory '{cache_dir}' does not exist, no cache to clear")
+            raise CacheError(f"[GeWaPro][cache] Cache directory '{cache_dir}' does not exist, no cache to clear")
         file_path_regex = re.compile(f"{function_to_clear.__name__}_.*\\.parquet$")
         for _, _, files in os.walk(cache_dir):
             for file in files:
                 if file_path_regex.match(file):
                     try:
                         os.remove(os.path.join(cache_dir,file))
-                        if verbose:
-                            print(f"Failed to remove file '{file}' from cache directory: {err}")
+                        if verbose is True or (verbose == "auto" and getattr(function_to_clear,"verbose",False)):
+                            print(f"[GeWaPro][cache] Removed file '{file}' from cache directory '{cache_dir}'")
                     except Exception as err:
-                        if verbose:
-                            print(f"Remove file '{file}' from cache directory '{cache_dir}'")
+                        if verbose is True or (verbose == "auto" and getattr(function_to_clear,"verbose",False)):
+                            print(f"[GeWaPro][cache] Failed to remove file '{file}' from cache directory: {err}")
     return clear_cache
 
 
@@ -122,7 +123,7 @@ def _cache_info(function_to_inspect: Callable, cache_dir: str|os.PathLike, ignor
     return cache_info
 
 
-def cache(cache_dir: str|os.PathLike = "cache", ignore_args: List[str] = [], pre_cache: Callable = _process_kwargs, post_cache: Callable = _process_results):
+def cache(cache_dir: str|os.PathLike = "cache", ignore_args: list[str] = [], pre_cache: Callable = _process_kwargs, post_cache: Callable = _process_results, verbose: bool = True):
     """Stores all function calls to the wrapped function in cache, and retrieves if same arguments were used before
     
     - Cached wrapped function must return a ``pd.DataFrame``, otherwise caching will fail
@@ -134,14 +135,15 @@ def cache(cache_dir: str|os.PathLike = "cache", ignore_args: List[str] = [], pre
     NOTE: Does not work for functions that have variable args/kwargs. Also, using '/' within a function signature can
     cause erroneous cache calls
     """
-    def cache_decorator(func: Callable, cache_dir: str|os.PathLike, ignore_args: List[str], pre_cache: Callable, post_cache: Callable):
-        return cache_wrapper(func, cache_dir=cache_dir, ignore_args=ignore_args, pre_cache=pre_cache, post_cache=post_cache)
+    def cache_decorator(func: Callable, cache_dir: str|os.PathLike, ignore_args: list[str], pre_cache: Callable, post_cache: Callable):
+        return cache_wrapper(func, cache_dir=cache_dir, ignore_args=ignore_args, pre_cache=pre_cache, post_cache=post_cache, verbose=verbose)
     return partial(cache_decorator, cache_dir=cache_dir, ignore_args=ignore_args, pre_cache=pre_cache, post_cache=post_cache)
 
-def cache_wrapper(wrapped: Callable, cache_dir: str|os.PathLike, ignore_args: List[str], pre_cache: Callable = _process_kwargs, post_cache: Callable = _process_results):
+def cache_wrapper(wrapped: Callable, cache_dir: str|os.PathLike, ignore_args: list[str], pre_cache: Callable = _process_kwargs, post_cache: Callable = _process_results, verbose: bool = True):
     """Cache wrapper for functions, it is advised to use the function decorator ``@cache()`` instead"""
     # Check if all args are valid and get annotations with defaults
     _check_validity(wrapped)
+    wrapped.verbose = bool(verbose)
     annotations, defaults = _get_annotations(wrapped), _get_defaults(wrapped)
     # Check if args provided can be ignored
     for arg in ignore_args:
@@ -150,7 +152,7 @@ def cache_wrapper(wrapped: Callable, cache_dir: str|os.PathLike, ignore_args: Li
     # Create cache folder if it does not already exist
     if not os.path.exists(cache_dir):
         os.makedirs(cache_dir)
-        print(f"[CACHE WRAPPER] Created cache directory: {os.path.join(cache_dir,"strip")[:-5]}")
+        print(f"[GeWaPro][cache] Created cache directory: {os.path.join(cache_dir,"strip")[:-5]}") if verbose else None
 
     # Create the cached function
     def cached_func(*args, **kwargs):
@@ -180,15 +182,17 @@ def cache_wrapper(wrapped: Callable, cache_dir: str|os.PathLike, ignore_args: Li
 def _call_or_get_from_cache(wrapped: Callable, kwargs: dict, file_path: str):
     """Checks if file for current kwargs already exists, otherwise calls `wrapped` with kwargs and saves to `file_path`"""
     if os.path.exists(file_path):
-        print(f"[CACHE WRAPPER] Found file in cache for call {wrapped.__name__}{_func_string(kwargs,limit=200)}: {file_path}")
+        if getattr(wrapped,"verbose",True):
+            print(f"[GeWaPro][cache] Found file in cache for call {wrapped.__name__}{_func_string(kwargs,limit=200)}: {file_path}")
         return pd.read_parquet(file_path)
-    print(f"[CACHE WRAPPER] No cache for call {wrapped.__name__}{_func_string(kwargs,limit=200)}, running function...")
+    if (vb := getattr(wrapped,"verbose",True)):
+        print(f"[GeWaPro][cache] No cache for call {wrapped.__name__}{_func_string(kwargs,limit=200)}, running function...")
     save_df = wrapped(**kwargs)
     if isinstance(save_df, pd.DataFrame):
         save_df.to_parquet(file_path)
     else:
-        raise TypeError(f"Function {wrapped.__name__} did not output 'pd.DataFrame', but '{save_df.__class__.__name__}'")
-    print(f"[CACHE WRAPPER] Saved to file: {file_path}")
+        raise CacheError(f"Function {wrapped.__name__} did not output 'pd.DataFrame', but '{save_df.__class__.__name__}'")
+    print(f"[GeWaPro][cache] Saved to file: {file_path}") if vb else None
     return save_df
 
 def _check_annotations_get_kwargs(annotations: dict, defaults: dict, *args, **kwargs) -> dict|tuple[str,str]:
@@ -198,7 +202,7 @@ def _check_annotations_get_kwargs(annotations: dict, defaults: dict, *args, **kw
         if not kwarg_key in annotations.keys():
             note += f"Got invalid kwarg: \'{kwarg_key}\'. "
     # Get dict of keyword arguments that are empty, fill with positional arguments
-    fill_empty_kwargs_with_args = {k:v for k,v in list(zip(annotations, list(args) + [Empty()]*len(annotations))) if v != Empty()}
+    fill_empty_kwargs_with_args = {k:v for k,v in list(zip(annotations, list(args) + [...]*len(annotations))) if v is not ...}
     # Fail if kwargs are named that are already filled by positional arguments
     if overwritten := [k for k in kwargs.keys() if k in fill_empty_kwargs_with_args.keys()]:
         note += f"Args overwritten by kwargs: \'{'\', \''.join(overwritten)}\'. "
@@ -220,7 +224,7 @@ def _get_defaults(func: Callable) -> dict[str, Any]:
 def _get_annotations(func: Callable) -> dict:
     """Gets dict of annotations of all `func` arguments, even if not annotated"""
     valid_varnames = func.__code__.co_varnames[:func.__code__.co_argcount+func.__code__.co_kwonlyargcount]
-    inspected_annotations: dict = {a:Empty for a in valid_varnames} | func.__annotations__
+    inspected_annotations: dict = {a:... for a in valid_varnames} | func.__annotations__
     inspected_annotations.pop("return",None)
     return inspected_annotations
 

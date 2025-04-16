@@ -3,7 +3,7 @@ import numpy as np
 from typing import Tuple, List, Literal, Callable
 from sklearn.model_selection import train_test_split
 from gewapro.functions import combine_or, combine_and
-from gewapro.util import pandas_string_rep
+from gewapro.util import pandas_string_rep, get_column_map, cols_to_name
 from gewapro.cache import cache
 import os
 
@@ -24,7 +24,7 @@ def train_test_split_cond(*arrays, test_size=None, train_size=None, random_state
             for i in range(len(split_arrays)):
                 if i % 2 == 1:
                     split_arrays[i] = np.append(split_arrays[i], not_conditioned_arrays[(i-1)//2], axis=0)
-                    print(f"Appended not conditioned array {i}/{len(not_conditioned_arrays)} to split array index {i}")
+                    print(f"[GeWaPro][preprocessing.train_test_split_cond] Appended not conditioned array {i}/{len(not_conditioned_arrays)} to split array index {i}")
     return split_arrays
 
 # def get_split_waveforms(uniform_test_set: list[int] = []):
@@ -50,7 +50,7 @@ def select_from_source(source_data: pd.DataFrame,
         raise TypeError(f"source_data must be a DataFrame, got {source_data}")
     elif isinstance(source_data, pd.DataFrame) and any([col not in source_data.columns for col in ["Ch","E"]]):
         raise ValueError(f"source_data must be a DataFrame with columns 'Ch' and 'E', but got: {pandas_string_rep(source_data)}")
-    if select_channels:
+    if select_channels or select_channels == 0:
         channel_condition = combine_or(*[source_data["Ch"] == ch for ch in ([select_channels] if isinstance(select_channels,int) else select_channels)])
     else:
         channel_condition = np.array([True]*len(source_data))
@@ -97,12 +97,12 @@ def get_waveforms(*indices: int,
         raise ValueError("Invalid indices provided. May be start,stop args for slicing, or list of indices")
 
     data_vals = source_data.values
-    i = {"dT":"-"} | {col:i for i,col in enumerate(source_data.columns) if col in ["Ch","E","Tref","dT","s0"]}
-    # print(source_data.columns, i,"\n", source_data.head(n=3))
+    colmap = get_column_map(source_data, {"Ch":int,"T0":float,"Tfit":float,"dT":float,"E":int})
+    s0 = get_column_map(source_data, ["s0"])["s0"]
     if include_energy: # Includes 1/50_000th of the energy in eV (max was ~56e3 eV)
-        data = {f"[{j}] Tref {data_vals[j][i['Tref']]}, dT {'-' if i['dT'] == '-' else data_vals[j][i['dT']]}, E {int(data_vals[j][i['E']])}": np.append(data_vals[j][i['E']]*2e-5, data_vals[j][i['s0']:]) for j in indices}
+        data = {cols_to_name(j,colmap,data_values=data_vals): np.append(data_vals[j][colmap['E']]*2e-5, data_vals[j][s0:]) for j in indices}
     else:
-        data = {f"[{j}] Tref {data_vals[j][i['Tref']]}, dT {'-' if i['dT'] == '-' else data_vals[j][i['dT']]}, E {int(data_vals[j][i['E']])}": data_vals[j][i['s0']:] for j in indices}
+        data = {cols_to_name(j,colmap,data_values=data_vals): data_vals[j][s0:] for j in indices}
     df = pd.DataFrame(data=data)
     if get_indices_map is True:
         return df, {j: list(data.keys())[i] for i,j in enumerate(indices)}

@@ -1,8 +1,88 @@
 import os
 import pandas as pd
 import numpy as np
-from typing import Iterable
+from typing import Iterable, Callable
+from functools import partial
+import warnings
+import re
 from gewapro.functions import rmse, var
+from contextlib import contextmanager
+
+class strictclassmethod:
+    """Behaves as the built-in ``classmethod`` decorator, but will raise an error when called on instances"""
+    def __init__(self, method):
+        self.method: Callable = method
+    def __get__(self, instance, cls):
+        if instance:
+            raise TypeError(f"The {self.method.__qualname__} method can only be called on the {cls.__name__} class, not on instances of {cls.__name__}")
+        def clsmethod(*args, **kwargs):
+            return self.method(cls, *args, **kwargs)
+        return clsmethod
+
+def print_warnings(warning_format: str = "[WARNING] <TyPe>: <Message>"):
+    """Catches all warnings that the function execution raises and prints them according to `warning_format`
+
+    Follows the capitalization of \\<type\\> and \\<message\\>, e.g. "UserWarning: test warning you CANNOT miss!" with format "[\\<TYPE\\>]
+    \\<Message\\>" will be printed as "[USERWARNING] Test warning you CANNOT miss!"
+    """
+    if not isinstance(warning_format, str):
+        raise TypeError("warning_format must be a string")
+    def warn_decorator(func: Callable, warning_format: str):
+        return warn_wrapper(func, warning_format=warning_format)
+    return partial(warn_decorator, warning_format=warning_format)
+
+def warn_wrapper(wrapped: Callable, warning_format: str):
+    """Warning wrapper for functions, it is advised to use the function decorator ``@print_warnings()`` instead"""
+    # Function that replaces type and message in the format with values
+    def _replace_from_format(formatter: str, type: str, message: str):
+        replacer = {formatter[(sl:=formatter.lower().find("<type>")):sl+6]:str(type),
+                    formatter[(sl:=formatter.lower().find("<message>")):sl+9]:str(message)}
+        for k,v in replacer.items():
+            for stringmethod in ["lower","upper","capitalize"]:
+                if k and k[1:-1] == k[1:-1].__getattribute__(stringmethod)():
+                    if stringmethod == "capitalize":
+                        replacer[k] = v.upper()[:1]+v[1:]
+                    else:
+                        replacer[k] = v.__getattribute__(stringmethod)()
+            formatter = formatter.replace(k,replacer[k]) if k else formatter
+        return formatter
+
+    # Create the wrapped function
+    def warn_func(*args, **kwargs):
+        # Catch all warnings
+        with warnings.catch_warnings(record=True) as caught_warnings:
+            output = wrapped(*args, **kwargs)
+            for warning in caught_warnings:
+                # Print each warning as it is caught
+                print(_replace_from_format(warning_format,warning.category.__name__,warning.message))
+            return output
+    return warn_func
+
+@contextmanager
+def modify_message(*exceptions: Exception, prepend_msg: str = "", append_msg: str = "", replace: dict[str,str] = {}, notes: dict[str,str] = {}):
+    if any(invalid_excepts := [not (isinstance(excep, Exception) or "Exception" in str(excep)) for excep in exceptions]):
+        raise ValueError(f"Got non-ExceptionType in exceptions arguments: {[t[0] for t in zip(exceptions,invalid_excepts) if t[1]==1]}")
+
+    def _replace(string: str, replacer: dict[str,str]):
+        for replace in replacer:
+            string = string.replace(replace, replacer[replace])
+        return string
+
+    def _add_notes(err: Exception, checker: dict[str,str]):
+        for string in checker:
+            if string in err.args[0]:
+                err.add_note(checker[string])
+        return err
+
+    if not exceptions:
+        exceptions = Exception
+    try:
+        yield # You can return something if you want, that gets picked up in the 'as'
+    except exceptions as err:
+        err.args = ((f"{prepend_msg}{_replace(arg,replace)}{append_msg}" if i == 0 else arg) for i,arg in enumerate(err.args))
+        raise _add_notes(err, notes)
+    finally:
+        pass
 
 def _validate_a_b(correct_energy: tuple[float,float]|dict) -> tuple[float,float]:
     if len(correct_energy) == 2 and (isinstance(correct_energy, (list,tuple)) and all([isinstance(i,(float,int)) for i in correct_energy])) or (
@@ -69,24 +149,145 @@ def stats(df: pd.DataFrame):
 def remove_all_input_examples_locally():
     """Remove all the input examples from the models in all runs"""
     exp_folders = [ f.path for f in os.scandir("mlruns") if (f.is_dir() and not ".trash" in f.path and not "models" in f.path)]
-    # print(exp_folders)
     i = 0
     for exp_folder in exp_folders:
         run_folders = [ f.path for f in os.scandir(exp_folder) if (f.is_dir() and not "tags" in f.path and not "datasets" in f.path)]
-        print("Checking folder",exp_folder, "with runs "+", ".join(run_folders)) if run_folders else None
+        print("[GeWaPro][util.remove_all_input_examples_locally] Checking folder",exp_folder, "with runs "+", ".join(run_folders)) if run_folders else None
         for run_folder in run_folders:
             model_folder = [f.path for f in os.scandir(os.path.join(run_folder,"artifacts")) if f.is_dir() ]
             for model_f in model_folder:
-                # print("Found model folder:",model_folder)
+                # print("[GeWaPro][util.remove_all_input_examples_locally] Found model folder:",model_folder)
                 if os.path.isfile(os.path.join(model_f, "input_example.json")):
                     os.remove(os.path.join(model_f, "input_example.json"))
-                    print("removed",(os.path.join(model_f, "input_example.json")))
+                    print("[GeWaPro][util.remove_all_input_examples_locally] Removed",(os.path.join(model_f, "input_example.json")))
                     i += 1
                 else:
                     continue
                 if os.path.isfile(os.path.join(model_f, "serving_input_example.json")):
                     os.remove(os.path.join(model_f, "serving_input_example.json"))
-                    print("removed",(os.path.join(model_f, "serving_input_example.json")))
+                    print("[GeWaPro][util.remove_all_input_examples_locally] Removed",(os.path.join(model_f, "serving_input_example.json")))
                     i += 1
-    print("Done.", i, "files removed")
+    print("[GeWaPro][util.remove_all_input_examples_locally] Done.", i, "files removed")
 
+def get_column_map(df: pd.DataFrame, valid_columns: dict[str,type]|list[str]) -> dict:
+    """Gets a numerical column map of the columns in valid_colums to the DataFrame, ordered as in valid_columns"""
+    defaults = dict(zip(valid_columns,["-"]*len(valid_columns)))
+    if isinstance(valid_columns, dict):
+        return defaults | {col:[i,valid_columns[col]] for i,col in enumerate(df.columns) if col in valid_columns}
+    elif isinstance(valid_columns, (list,tuple,set)):
+        return defaults | {col:i for i,col in enumerate(df.columns) if col in valid_columns}
+    else:
+        raise ValueError("valid_columns must be list or dict")
+
+def cols_to_name(j: int, column_map: dict, data_values: np.ndarray) -> str:
+    """Creates waveform column name from values"""
+    return f"[{j}] "+", ".join([f"{col} {'-' if val == '-' else val[1](data_values[j][val[0]])}" for col,val in column_map.items()])
+
+def name_to_vals(col_name:str) -> dict[str,float]:
+    """Converts a column name back into its constituent values"""
+    names_list = col_name.split(", ")
+    names_list = [name.split(" ") for name in names_list]
+    # Remove the waveform index
+    names_list[0].pop(0)
+    return {k:v if v=="-" else get_int_or_float(v) for [k,v] in names_list}
+
+def get_int_or_float(x: str):
+    "Gets int or float from string"
+    try:
+        return int(x)
+    except ValueError:
+        return float(x)
+
+def sort(value: Iterable,/, convert_strings_to_values: bool = True) -> list|dict:
+    """Smart sorter, sorts e.g. ``['12', 1, '40', 'B', None, 'None', 2.4, 'A', '[13 13]', '[13 1]', np.inf]`` as ``[None, None, 1, 2.4, 12, 40, np.inf, [13 1], [13 13], 'A', 'B']``
+    
+    Always sorts in the order: None/nans, ints/floats, lists, strings (alphabetically)
+
+    NOTE: Tuples or sets cannot be sorted, dictionaries will be sorted by their keys. Note that convert_strings_to_values does not work for dicts (keys will remain string)
+    """
+    if (i := 2) and convert_strings_to_values:
+        i = 0
+    if isinstance(value, dict):
+        sorted_lists = _sort(list(value.keys()))
+        return {sorted_lists[2][j]:value[k] for j,k in enumerate(sorted_lists[2])}
+    return _sort(value)[i]
+
+def isort(value: Iterable) -> list:
+    """Returns the indices of the input list to sort according to the smart `sort(...)` function
+
+    NOTE: Tuples or sets cannot be sorted, dictionaries will be sorted by their keys
+    """
+    if isinstance(value, dict):
+        return _sort(list(value.keys()))[1]
+    return _sort(value)[1]
+
+def _sort(value: Iterable) -> tuple[list,list,list]:
+    """Returns sorted,i_sorted,sorted_original lists tuple"""
+    sortable_nans,nans_i = [],[]
+    sortable_floats,floats_i = [],[]
+    sortable_lists,lists_i = {},[]
+    sortable_strings,strings_i = [],[]
+    i_mapper = {}
+    if isinstance(value, str):
+        raise ValueError("Strings are not supported, got string to sort: \""+value+'"')
+    elif isinstance(value, dict):
+        raise ValueError(f"Dicts are not supported, got dict to sort: {value}")
+    for i,v in enumerate(value):
+        i_mapper[i] = v
+        if isinstance(v, str):
+            try:
+                if (v_strp := v.strip('" \'')).lower() == "nan":
+                    sortable_nans.append(np.nan),nans_i.append(i)
+                    i_mapper[i] = np.nan
+                elif v_strp.lower() == "none":
+                    sortable_nans = [None]+sortable_nans
+                    nans_i.append(i)
+                    i_mapper[i] = None
+                else:
+                    sortable_floats.append(get_int_or_float(v_strp)),floats_i.append(i)
+                    i_mapper[i] = get_int_or_float(v_strp)
+            except ValueError:
+                raised = True
+                if (v_strp.startswith("[") and v_strp.endswith("]")):
+                    try:
+                        float_ls = [get_int_or_float(x) for x in re.findall(r"[-+]?(?:\d*\.*\d+)", v_strp[1:-1])]
+                        raised = False if float_ls else True
+                        sortable_lists.setdefault(len(float_ls),[])
+                        sortable_lists[len(float_ls)].append(float_ls)
+                    except ValueError:
+                        raised = True
+                if raised:
+                    strings_i.append(i),sortable_strings.append(v)
+                else:
+                    lists_i.append(i)
+                    i_mapper[i] = float_ls
+        elif isinstance(v, (int,float)):
+            if np.nan is v:
+                sortable_nans.append(v),nans_i.append(i)
+            else:
+                sortable_floats.append(v),floats_i.append(i)
+        elif isinstance(v, list):
+            sortable_lists.setdefault(len(v),[])
+            sortable_lists[len(v)].append(v),lists_i.append(i)
+        elif v is None:
+            sortable_nans = [None]+sortable_nans
+            nans_i.append(i)
+        else:
+            raise ValueError(f"For sorting, only bools, ints, floats, strings, lists or None are supported. Got {v.__class__.__qualname__}: {v}")
+    sorted_lists = []
+    if sortable_lists:
+        for j in range(max(sortable_lists.keys())):
+            sorted_lists.extend(sorted(sortable_lists.get(j+1,[])))
+    if len(return_val := sortable_nans+sorted(sortable_floats)+sorted_lists+sorted(sortable_strings)) != len(value):
+        raise RuntimeError(f"Got sorted list (length {len(return_val)}) that was not equal in length as input list (length {len(value)})")
+
+    # Get all indices from input to sorted list
+    final_i_ls,start_len = [],0
+    for ls in [nans_i,floats_i,lists_i,strings_i]:
+        ivals = [j for k in range(start_len,start_len+len(ls)) for j in ls if (i_mapper[j] == return_val[k] or i_mapper[j] is return_val[k])]
+        start_len += len(ls)
+        uivals = []
+        for k in ivals:
+            uivals.append(k) if k not in uivals else None
+        final_i_ls.extend(uivals)
+    return return_val,final_i_ls,[value[k] for k in final_i_ls]

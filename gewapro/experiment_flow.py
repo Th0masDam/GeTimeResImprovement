@@ -13,10 +13,9 @@ from datetime import datetime
 import plotly.graph_objects as go
 from gewapro.preprocessing import get_waveforms, train_test_split_cond, get_and_smoothen_waveforms
 from gewapro.plotting import histogram, energy_scatter_plot
-import warnings
 from typing import Callable, Literal
-from gewapro.models import regressor_model, train_model, predict, loggable_model_params, loggable_model_metrics, model_type, log_model, warn_wrapper
-from gewapro.cache import cache
+from gewapro.models import regressor_model, train_model, predict, loggable_model_params, loggable_model_metrics, model_type, log_model
+from gewapro.util import name_to_vals, warn_wrapper
 from_numpy = warn_wrapper(from_numpy, "[WARNING] <Message>")
 
 def sort_test_ranges(test_set_ranges: list[int]) -> list[tuple[int,int]]:
@@ -43,21 +42,17 @@ def create_test_sets(test_set_ranges: list[int],
     else:
         return test_sets
 
-def get_test_set_results(test_sets: dict[str, pd.DataFrame], pca_model: PCA, regressor, dT_correcting: bool = False) -> tuple[dict[str,float],dict[str,go.Figure]]:
+def get_test_set_results(test_sets: dict[str, pd.DataFrame], pca_model: PCA, regressor, which="Tfit") -> tuple[dict[str,float],dict[str,go.Figure]]:
     """Gets test set results for a given dict of test_sets, a fitted PCA model & a regressor"""
     x_to_t = lambda x: 160-(x*4)
     uniform_metrics = {}
     uniformity_artifacts = {}
     for k,df in test_sets.items():
         data_trans = pca_model.transform(df.T.values) if pca_model else df.T.values
-        s_labels_t = pd.Series(np.array([float([s[s.find("Tref")+4:s.find(",dT")] for s in [col.replace(" ","")]][0]) for col in df.columns]))
-        labels_dt = 0*s_labels_t
-        if dT_correcting:
-            labels_dt = np.array([float([s[s.find(",dT")+3:s.find(",E")] for s in [col.replace(" ","")]][0]) for col in df.columns])
-            s_labels_ref_dt = pd.Series(labels_dt - s_labels_t.values,name="dT - Tref")
-        s_labels_t.name = f"Initial data: Tref"
-        pred_s_test = pd.Series(x_to_t(predict(regressor, data_trans)) - s_labels_t + labels_dt,name=f"Tpred - Tref (test, E\u2208{k})")
-        hist = histogram(pd.concat([s_labels_t,pred_s_test]+([s_labels_ref_dt] if dT_correcting else []), axis=1), [-30,30,0.25], title="Arrival Time Histogram", xaxis_title="Time (ns)", yaxis_title="Prevalence")
+        s_labels_t = pd.Series(np.array([name_to_vals(col)[which] for col in df.columns]))
+        s_labels_t.name = f"Initial data: "+which
+        pred_s_test = pd.Series(s_labels_t - x_to_t(predict(regressor, data_trans)), name=f"{which} - Tpred (test, E\u2208{k})")
+        hist = histogram(pd.concat([s_labels_t,pred_s_test], axis=1), [-30,30,0.25], title="Arrival Time Histogram", xaxis_title="Time (ns)", yaxis_title="Prevalence")
         uniformity_artifacts[f"PredictionHistogramE{k[1:-1].replace(', ','-')}"] = hist
         uniform_metrics[f"Uniform test FWHM E{k[1:-1].replace(', ','-')}"] = 2*np.sqrt(2*np.log(2)) * hist._params[pred_s_test.name+" Gaussian"]["sigma"]
     return uniform_metrics, uniformity_artifacts
@@ -75,13 +70,13 @@ def run_experiment(data: pd.DataFrame,
                    remove_nan_waveforms: bool = False,
                    pca_components: int = 64,
                    pca_method: PCA|TruncatedSVD = PCA,
-                   dT_correcting: bool = False,
                    return_regressor: bool = False,
                    uniform_test_set: list[int] = [],
                    test_size: float = 0.5,
                    show_progress_bar: bool = False,
                 #    exclude_uts_from_training_data: bool = True,
                    log_level: Literal["WARNING","INFO","DEBUG","ERROR"] = "WARNING",
+                   which: str = "Tfit",
                    **kwargs
                    ):
     """Runs & logs an MLFlow experiment with the given parameters, returns a figure as output
@@ -91,7 +86,7 @@ def run_experiment(data: pd.DataFrame,
     alpha: float = 1e-4,
     max_iterations: int = 2000,
     """
-    if applied_conditions and not isinstance(applied_conditions_names, (list, tuple)) and not applied_conditions_names:
+    if applied_conditions and (not isinstance(applied_conditions_names, (list, tuple)) or not applied_conditions_names):
         raise ValueError("If conditions are applied to the data, names of those must be given as a non-empty list in applied_conditions_names")
     start_time = datetime.now()
     # Remove annoying INFOs and progress bars
@@ -99,6 +94,7 @@ def run_experiment(data: pd.DataFrame,
     logger = getLogger("mlflow")
     logger.setLevel(log_level)
     # Get kwargs
+    exp_name = kwargs.pop("experiment_name","")
     m_type = kwargs.pop("model_type","SKLearn")
     hidden_layers = kwargs.pop("hidden_layers", [16])
     alpha = kwargs.pop("alpha", 1e-4)
@@ -113,8 +109,8 @@ def run_experiment(data: pd.DataFrame,
     # Get all data
     if "raw" not in data_name:
         if smoothing_window:
-            print(f"[MLFlow run] Smoothing waveforms within energy range {smoothing_energy_range} over window(s) {smoothing_window}, normalize: {normalize_after_smoothing}")
-            data_df = get_and_smoothen_waveforms(source_data_path = os.path.join("data",data_name),
+            print(f"[GeWaPro][experiment_flow.run_experiment] Smoothing waveforms within energy range {smoothing_energy_range} over window(s) {smoothing_window}, normalize: {normalize_after_smoothing}")
+            data_df = get_and_smoothen_waveforms(source_data_path = data,
                                                 include_energy = include_energy,
                                                 select_channels = select_channels,
                                                 select_energies = select_energies,
@@ -130,7 +126,7 @@ def run_experiment(data: pd.DataFrame,
                                              include_energy=include_energy,
                                              select_channels=select_channels,
                                              limit="smallest")
-                print(f"[MLFlow run] Created uniform test sets of length {len(list(test_sets.values())[0].columns)} in energy (arb. unit) ranges:",test_ranges)
+                print(f"[GeWaPro][experiment_flow.run_experiment] Created uniform test sets of length {len(list(test_sets.values())[0].columns)} in energy (arb. unit) ranges:",test_ranges)
         av_len = None
     else:
         if uniform_test_set:
@@ -140,30 +136,22 @@ def run_experiment(data: pd.DataFrame,
     
     # Check and handle empty data
     if data_df.isnull().values.any() and not remove_nan_waveforms:
-        print("[WARNING] Waveform data contains NaNs, this will cause errors later. Pass remove_nan_waveforms=True or remove the following waveforms manually:")
+        print("[WARNING][GeWaPro][experiment_flow.run_experiment] Waveform data contains NaNs, this will cause errors later. Pass remove_nan_waveforms=True or remove the following waveforms manually:")
         display(data_df.loc[:, data_df.isna().any()])
     elif data_df.isnull().values.any():
         remove_cols = [*data_df.loc[:, data_df.isna().any()].columns]
-        print("[WARNING] Waveform data contains NaNs! Removing columns: "+" & ".join(remove_cols).replace(" &",",",len(remove_cols)-1))
+        print("[WARNING][GeWaPro][experiment_flow.run_experiment] Waveform data contains NaNs! Removing columns: "+" & ".join(remove_cols).replace(" &",",",len(remove_cols)-1))
         data_df = data_df.drop(columns=remove_cols)
 
     # Get labels
     available_length = av_len or get_waveforms(source_data=data, get_indices_map=False, select_channels=select_channels).shape[1]
-    if any([["-" == s[s.find(",dT")+3:s.find(",E")] for s in [col.replace(" ","")]][0] for col in data_df.columns]) and dT_correcting is True:
-        raise ValueError(f"Found no dT labels in the given data, while this is required for training a dT correcting model")
-    elif dT_correcting is True:
-        labels_dt = np.array([float([s[s.find(",dT")+3:s.find(",E")] for s in [col.replace(" ","")]][0]) for col in data_df.columns])
-        labels_t = np.array([float([s[s.find("Tref")+4:s.find(",dT")] for s in [col.replace(" ","")]][0]) for col in data_df.columns]) - labels_dt
-    elif dT_correcting is False:
-        labels_t = np.array([float([s[s.find("Tref")+4:s.find(",dT")] for s in [col.replace(" ","")]][0]) for col in data_df.columns])
-    else:
-        raise ValueError(f"dT_correcting argument must be either True or False, not {dT_correcting}")
+    labels_t = np.array([name_to_vals(col)[which] for col in data_df.columns])
     labels_x = t_to_x(labels_t)
     wave_i = np.array([int(col[col.find("[")+1:col.find("]")]) for col in data_df.columns])
 
     # Transform the data (PCA)
     if pca_components is None or pca_components == len(data_df): # Leave data as is when PCA components is None or data length
-        print("[MLFlow run] Got PCA components equal to data dimension, skipping transform...")
+        print("[GeWaPro][experiment_flow.run_experiment] Got PCA components equal to data dimension, skipping transform...")
         data_trans = data_df.T.values
         PCA_seed = pca_method_str = model = None
     else:                              # Otherwise raise error (components > data length) or fit and transform
@@ -180,7 +168,7 @@ def run_experiment(data: pd.DataFrame,
     d_train, d_test, l_train, l_test, l_train_t, l_test_t, wi_train, wi_test = train_test_split_cond(data_trans, labels_x, labels_t, wave_i, test_size=test_size, 
                                                                                                      condition=applied_conditions, random_state=42, 
                                                                                                      add_removed_to_test=True)
-    print("[MLFlow run] Divided data in train, test sets:",l_train.shape, l_test.shape," -> total set of",l_train.shape[0]+l_test.shape[0],"/ available",available_length)
+    print("[GeWaPro][experiment_flow.run_experiment] Divided data in train, test sets:",l_train.shape, l_test.shape," -> total set of",l_train.shape[0]+l_test.shape[0],"/ available",available_length)
     
     # Create datasets for logging
     source_path = os.path.join(os.path.abspath("./data"),data_name)
@@ -199,38 +187,38 @@ def run_experiment(data: pd.DataFrame,
     # Create a name for the experiment and start it
     name_signature = data_name[-15:][data_name[-16:].find("-"):-4]
     channels = [select_channels] if isinstance(select_channels, int) else select_channels
-    experiment_name = f"{model_type(regr)}, Na22 {'th.'+name_signature[-2:] if 'ecf' in name_signature else name_signature} Ch{channels[0] if len(channels) == 1 else channels}"
+    experiment_name = exp_name or f"{model_type(regr)}, Na22 {'th.'+name_signature[-2:] if 'ecf' in name_signature else name_signature} Ch{channels[0] if len(channels) == 1 else channels}"
     prepend_run_name = "XGBoostedTree" if model_type(regr) == "XGBoostTree" else f"{model_type(regr)}{str(hidden_layers).replace(',','')}"
     run_name = f"{prepend_run_name}_{(l_train.shape[0]+l_test.shape[0])/(np.nan if isinstance(av_len, str) else available_length):.2%}_{datetime.now().strftime("%Y%m%d_%H%M%S")[2:]}"
     experiment = mlflow.set_experiment(experiment_name)
     
-    print(f"[MLFlow run] Finished setup of experiment '{experiment_name}', run '{run_name}' in {datetime.now()-start_time}. Starting model fitting (timed in MLFlow)...")
+    print(f"[GeWaPro][experiment_flow.run_experiment] Finished setup of experiment '{experiment_name}', run '{run_name}' in {datetime.now()-start_time}. Starting model fitting (timed in MLFlow)...")
 
     with mlflow.start_run(run_name=run_name) as mlflow_run:
         # Creating and training the model, clock starts ticking here
-        print("[MLFlow run] Fitting model...")
+        print("[GeWaPro][experiment_flow.run_experiment] Fitting model...")
         now = datetime.now()
         regr = train_model(regr, d_train, l_train)
-        print("[MLFlow run] Finished fitting model in",datetime.now()-now)
+        print("[GeWaPro][experiment_flow.run_experiment] Finished fitting model in",datetime.now()-now)
 
         # Combining labels and creating prediction Series
         s_labels_t = pd.Series(np.append(l_train_t,l_test_t))
         shift = -round(s_labels_t.apply(lambda x: round(x)).mode().iloc[0])
-        s_labels_t.name = f"Initial data: Tref {'- dT' if dT_correcting else ''}{'-' if shift < 0 else '+'} {abs(shift)} ns"
+        s_labels_t.name = f"Initial data: {which} {'-' if shift < 0 else '+'} {abs(shift)} ns"
         predicted_train = predict(regr, d_train)
-        pred_s_train = pd.Series(x_to_t(predicted_train) - l_train_t,name="dT + Tcorr - Tref (train)" if dT_correcting else "Tpred - Tref (train)")
-        pred_s_test = pd.Series(x_to_t(predict(regr, d_test)) - l_test_t,name="dT + Tcorr - Tref (test)" if dT_correcting else "Tpred - Tref (test)")
-        
+        pred_s_train = pd.Series(l_train_t - x_to_t(predicted_train),name=f"{which} - Tpred (train)")
+        pred_s_test = pd.Series(l_test_t - x_to_t(predict(regr, d_test)),name=f"{which} - Tpred (test)")
+
         # Add histogram with predicted vs actual data
         fig_hist = histogram(pd.concat([s_labels_t+shift,pred_s_train,pred_s_test], axis=1), [-30,30,0.25], title="Arrival Time Histogram", xaxis_title="Time (ns)", yaxis_title="Prevalence")
-        print("[MLFlow run] Created histogram with params: "+str(fig_hist._params).replace('\n','').replace('       '," ").replace("  "," "))
+        print("[GeWaPro][experiment_flow.run_experiment] Created histogram with params: "+str(fig_hist._params).replace('\n','').replace('       '," ").replace("  "," "))
         fwhm_train = 2*np.sqrt(2*np.log(2)) * fig_hist._params[pred_s_train.name+" Gaussian"]["sigma"]
         fwhm_test = 2*np.sqrt(2*np.log(2)) * fig_hist._params[pred_s_test.name+" Gaussian"]["sigma"]
         overtraining_factor = fwhm_test / fwhm_train
 
         # Get fwhm from the uniform test sets
-        uniform_metrics, uniformity_artifacts = get_test_set_results(test_sets=test_sets, pca_model=model, regressor=regr, dT_correcting=dT_correcting)
-        print(f"[MLFlow run] Got FWHMs for test set bounds {test_ranges}: {list(uniform_metrics.values())}")
+        uniform_metrics, uniformity_artifacts = get_test_set_results(test_sets=test_sets, pca_model=model, regressor=regr, which=which)
+        print(f"[GeWaPro][experiment_flow.run_experiment] Got FWHMs for test set bounds {test_ranges}: {list(uniform_metrics.values())}")
 
         # Log all parameters, figures, metrics and inputs
         mlflow.set_experiment_tag("BaseModel","SKLearn Neural Network MLPRegressor")
@@ -250,9 +238,9 @@ def run_experiment(data: pd.DataFrame,
             "PCA components": pca_components,
             "PCA random seed": PCA_seed,
             # "PCA explained variance": pca_var_ratio,
-            "dT correcting": dT_correcting,
+            "Tref": which,
         } | loggable_model_params(regr))
-        print(f"[MLFlow run] Logged parameters")
+        print(f"[GeWaPro][experiment_flow.run_experiment] Logged parameters")
         mlflow.log_figure(fig_hist, "PredictionHistogram.html")
         for figname,figure in uniformity_artifacts.items():
             mlflow.log_figure(figure, figname+".html")
@@ -263,7 +251,7 @@ def run_experiment(data: pd.DataFrame,
                             xaxis_title="Epoch",
                             yaxis_title="Loss")
             mlflow.log_figure(fig, "LossCurve.html")
-        print(f"[MLFlow run] Logged figures")
+        print(f"[GeWaPro][experiment_flow.run_experiment] Logged figures")
         mlflow.log_metrics({
             "FWHM Train": fwhm_train,
             "FWHM Test": fwhm_test,
@@ -273,10 +261,10 @@ def run_experiment(data: pd.DataFrame,
             "Test mean": pred_s_test.mean(),
             "Test RMS": pred_s_test.std()
         } | loggable_model_metrics(regr, d_test, l_test) | uniform_metrics)
-        print(f"[MLFlow run] Logged metrics")
+        print(f"[GeWaPro][experiment_flow.run_experiment] Logged metrics")
         mlflow.log_input(dataset_train, context="training")
         mlflow.log_input(dataset_test, context="testing")
-        print(f"[MLFlow run] Logged inputs")
+        print(f"[GeWaPro][experiment_flow.run_experiment] Logged inputs")
 
         # Log the model and finish run
         now = datetime.now()
@@ -284,9 +272,8 @@ def run_experiment(data: pd.DataFrame,
                                d_train=d_train,
                                predicted_train=predicted_train,
                                PCA_seed=PCA_seed,
-                               PCA_method=pca_method_str,
-                               dT_correcting=dT_correcting)
-        print(f"[MLFlow run] Logged model in {datetime.now()-now}. Run '{run_name}' finished (run ID: {mlflow_run.info.run_id})")
+                               PCA_method=pca_method_str)
+        print(f"[GeWaPro][experiment_flow.run_experiment] Logged model in {datetime.now()-now}. Run '{run_name}' finished (run ID: {mlflow_run.info.run_id})")
     if return_regressor:
         return fig_hist, regr
     return fig_hist
