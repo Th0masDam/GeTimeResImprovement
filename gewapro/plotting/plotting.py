@@ -124,7 +124,8 @@ def box_plot(exp_id: list[int]|int,
     ignore_vals : dict[str, Any] | dict[tuple[str, ...], tuple[list[Any] | Any]]
         Dict of column names with corresponding (list of) value(s) to ignore. Will be strict AND rules when column
         names & value names are given as a set of tuples, e.g. `{("col1","col2"): ([0,1],[2])}` only excludes data
-        where (`col1` is `0` or `1`) AND (`col2` is `2`)
+        where (`col1` is `0` or `1`) AND (`col2` is `2`), while `{"col1": [0, 1], "col2": [2]}` excludes all data
+        where either `col1` is `0` or `col1` is `1` or `col2` is `2`.
     load_cols : list[str]|str
         Column names that are not to be plotted but should be loaded (e.g. for sorting with sort_by or ignoring values with ignore_vals)
     sort_by: list[str]|str
