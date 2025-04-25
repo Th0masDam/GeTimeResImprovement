@@ -38,6 +38,7 @@ class CacheSetupError(ValueError):
 #         return self.__eq__(other)
 
 class CacheInfo(NamedTuple):
+    """Provides info on the cache storage"""
     function: Callable
     cache_dir: str
     ignore_args: list

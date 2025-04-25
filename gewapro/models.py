@@ -1,5 +1,5 @@
 # Model creation functions
-import tensorflow as tf
+# import tensorflow as tf
 import keras
 from datetime import datetime
 # from pydantic import BaseModel
@@ -33,6 +33,7 @@ def _get_models() -> pd.DataFrame:
     return pd.DataFrame({last_updated:models},index=range(0,len(models)))
 
 def get_models() -> list:
+    "Gets a list of all model names of the models that are logged in the mlruns folder"
     model_df = _get_models()
     last_updated = model_df.columns.to_list()[0]
     if (datetime.now(tz=ZoneInfo("UTC")) - pd.to_datetime(last_updated)) > pd.to_timedelta("10s"):
@@ -52,7 +53,7 @@ def update_validity():
 class ModelInfo:
     """Info on a model, instantiated by ``model`` (later retrievable as attribute), or instantiated using the ``from_database`` class method
     
-    Attributes: ``pca_method``, ``pca_components``, ``pca_random_seed`` & ``dt_correcting``
+    Attributes: ``model``, ``model_name``, ``version``, ``pca_method``, ``pca_components``, ``pca_random_seed`` & ``which``
 
     Methods: ``get_and_check_transformer``
     """
@@ -62,7 +63,6 @@ class ModelInfo:
     pca_method: PCA|TruncatedSVD
     pca_components: int
     pca_random_seed: int
-    dt_correcting: bool
     which: str
 
     def __init__(self, model: mlflow.pyfunc.PyFuncModel):
@@ -75,8 +75,7 @@ class ModelInfo:
             pass
         else:
             raise ValueError(f"Unknown PCA decomposition method '{pca_method}' found in model, known methods are 'sklearn.decomposition.PCA' and 'sklearn.decomposition.TruncatedSVD'")
-        try:  # Whether the model predicts a correction to dT or whole new value
-            dt_correcting = bool(model.metadata.metadata.get("dT correcting", 0)) if model.metadata.metadata else False
+        try:
             pca_random_seed = model.metadata.metadata.get("PCA random seed", None) if model.metadata.metadata else None
             which = model.metadata.metadata.get("which", None) if model.metadata.metadata else None
             pca_components = int(model.metadata.signature.inputs.inputs[0].shape[-1])
@@ -90,7 +89,6 @@ class ModelInfo:
         self._pca_method_name = "'"+pca_method_name+"'" if pca_method else None
         self.pca_components = pca_components
         self.pca_random_seed = pca_random_seed
-        self.dt_correcting = dt_correcting
         self.which = which
     
     def get_transformer(self) -> PCA|TruncatedSVD:
@@ -130,9 +128,8 @@ class ModelInfo:
         bar = "="*42  # Answer to everything
         model_info = "MLFlow info:\n "+f"{self.model}".rstrip()
         pca_str = f"PCA method: {self._pca_method_name}\nPCA components: {self.pca_components}\nPCA random seed: {self.pca_random_seed}" if self.pca_method else "<No PCA method>"
-        dt_correcting_str = f"Is dt correcting: {self.dt_correcting}"
         which_str = f"Which labels have been used: {self.which}"
-        return "\n".join([title,bar,model_info,pca_str,dt_correcting_str,which_str])+"\n"
+        return "\n".join([title,bar,model_info,pca_str,which_str])+"\n"
 
 
 def fitted_PCA(model_version: int, waveforms: pd.DataFrame, model_name: str = "MLPRegressorModel") -> PCA|TruncatedSVD:
@@ -307,20 +304,20 @@ def loggable_model_metrics(fitted_model, data_test, labels_test):
         raise ValueError(f"Model type not recognized: '{m_type}'")
 
 @print_warnings()
-def log_model(fitted_model, d_train: np.ndarray, predicted_train: np.ndarray, PCA_seed: int, PCA_method: str, dT_correcting: bool = False, registered_model_name: str = "auto") -> model.ModelInfo:
+def log_model(fitted_model, d_train: np.ndarray, predicted_train: np.ndarray, PCA_seed: int, PCA_method: str, registered_model_name: str = "auto") -> model.ModelInfo:
     """Model type agnostic logging function for MLFlow. Can log keras' Sequential NN model, xgboost's XGBoostedTree and sklearn's MLPRegressorModel
     
     INFO: predicted_train is only used to infer the function signature (so not fully logged)"""
+    autoreg = True if registered_model_name == "auto" else False
     if (m_type := model_type(fitted_model)) == "SKLearnNN":
         return mlflow.sklearn.log_model(
             sk_model=fitted_model,
             artifact_path="sk_models",
             signature=infer_signature(d_train, predicted_train),
             input_example=d_train[:1],
-            registered_model_name="MLPRegressorModel2",
+            registered_model_name="MLPRegressorModel" if autoreg else registered_model_name,
             metadata={"PCA random seed": PCA_seed,
-                      "PCA method": PCA_method,
-                      "dT correcting": dT_correcting}
+                      "PCA method": PCA_method}
         )
     elif m_type == "XGBRegressor":
         return mlflow.xgboost.log_model(
@@ -328,10 +325,9 @@ def log_model(fitted_model, d_train: np.ndarray, predicted_train: np.ndarray, PC
             artifact_path="xgboost_models",
             signature=infer_signature(d_train, predicted_train),
             input_example=d_train[:1],
-            registered_model_name="XGBoostedTree",
+            registered_model_name="XGBoostedTree" if autoreg else registered_model_name,
             metadata={"PCA random seed": PCA_seed,
-                      "PCA method": PCA_method,
-                      "dT correcting": dT_correcting}
+                      "PCA method": PCA_method}
         )
     elif m_type == "KerasNN":
         return mlflow.keras.log_model(
@@ -339,10 +335,9 @@ def log_model(fitted_model, d_train: np.ndarray, predicted_train: np.ndarray, PC
             artifact_path="keras_models",
             signature=infer_signature(d_train, predicted_train),
             input_example=d_train[:1],
-            registered_model_name=fitted_model.name,
+            registered_model_name=fitted_model.name if autoreg else registered_model_name,
             metadata={"PCA random seed": PCA_seed,
-                      "PCA method": PCA_method,
-                      "dT correcting": dT_correcting}
+                      "PCA method": PCA_method}
         )
     else:
         raise ValueError(f"Model type not recognized: '{m_type}'")
@@ -396,6 +391,7 @@ def _get_version_map_for_length(exp_id: list[str], experiment_length: int, verbo
     return runs_df
 
 def get_model_version_map(exp_id: list[int]|int):
+    """Gets a DataFrame mapper of the MLFlow runs for a model type with columns 'model_version' and 'run_id' ordered by run time"""
     if (exp_id := exp_id if isinstance(exp_id, (list,tuple)) else [exp_id]) and not all([isinstance(i,int) for i in exp_id]):
         raise ValueError("exp_ids must be an integer or list of integers")
     all_runs = mlflow.search_runs(experiment_ids=(exp_id := [str(id) for id in exp_id]),search_all_experiments=True)

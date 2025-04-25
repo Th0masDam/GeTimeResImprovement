@@ -28,6 +28,7 @@ def create_test_sets(test_set_ranges: list[int],
                      include_energy: bool = False,
                      select_channels: list = [],
                      limit: Literal["smallest"]|None = "smallest") -> dict[str, pd.DataFrame]:
+    """Creates test sets from source_data within test_set_ranges, which are equal in size if limit=='smallest'"""
     test_ranges = sort_test_ranges(test_set_ranges)
     test_sets = {f"{test_range}": get_waveforms(source_data=source_data,
                                                 get_indices_map=False,
@@ -74,14 +75,58 @@ def run_experiment(data: pd.DataFrame,
                    uniform_test_set: list[int] = [],
                    test_size: float = 0.5,
                    show_progress_bar: bool = False,
-                #    exclude_uts_from_training_data: bool = True,
                    log_level: Literal["WARNING","INFO","DEBUG","ERROR"] = "WARNING",
                    which: str = "Tfit",
                    **kwargs
                    ):
     """Runs & logs an MLFlow experiment with the given parameters, returns a figure as output
+
+    Parameters
+    ----------
+    data: pd.DataFrame
+        DataFrame with source data. So not after processing with get_waveforms().
+    data_name: str
+        Name of the data set, used for logging (and your own administration). If this name contains 'raw',
+        it willassume get_waveforms() has already been run on the data and does not do further processing.
+    select_channels: list[int]|int
+        Channels to select. Note that when the source data contains only channel A and you pass here channel
+        B,there will not be any waveform data and the experiment will fail.
+    select_energies: tuple[int,int] = None
+        Energies to select from the source data.
+    include_energy: bool = False
+        Whether to include the energy column as a predictor (feature).
+    applied_conditions = None
+        Conditions applied to the selection of the source data.
+    applied_conditions_names: list = None
+        Name of the conditions, used for logging (and your own administration).
+    smoothing_window: int|tuple[int,int] = None
+        Not recommended. Smoothing to use.
+    smoothing_energy_range: tuple[int,int] = None
+        Not recommended. Smoothing energy range to use.
+    normalize_after_smoothing: bool = False
+        Not recommended. Whether to normalize again after smoothing.
+    remove_nan_waveforms: bool = False
+        Whether to remove completely empty waveforms.
+    pca_components: int = 64
+        Number of PCA components.
+    pca_method: PCA|TruncatedSVD = PCA
+        PCA method.
+    return_regressor: bool = False
+        Whether to return the finally fitted regressor.
+    uniform_test_set: list[int] = []
+        List of uniform test sets to include in the model evaluation. E.g. [0,500,1500,400,1000] will create sets
+        of ranges 0 - 500, 500 - 1500 and 400 - 1000, with equal number of waveforms in each set.
+    test_size: float = 0.5
+        Testing set size, by default 50%.
+    show_progress_bar: bool = False
+        Whether to show the annoying MLFlow progress bar in the output.
+    log_level: Literal["WARNING","INFO","DEBUG","ERROR"] = "WARNING"
+        Log level of the output during the experiment.
+    which: str = "Tfit"
+        Which label to train the model on.
     
-    Extra args for NN:
+    Extra args for NN
+    -----------------
     hidden_layers: list[int] = [16],
     alpha: float = 1e-4,
     max_iterations: int = 2000,

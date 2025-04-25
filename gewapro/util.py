@@ -60,6 +60,21 @@ def warn_wrapper(wrapped: Callable, warning_format: str):
 
 @contextmanager
 def modify_message(*exceptions: Exception, prepend_msg: str = "", append_msg: str = "", replace: dict[str,str] = {}, notes: dict[str,str] = {}):
+    """Context manager that modifies error messages, but keeps all else (e.g. traceback) intact.
+    
+    Arguments
+    ---------
+    *exceptions: Exception
+        Exceptions to catch. If not specified, catches all Exception types.
+    prepend_msg: str
+        String to prepend to all errors raised.
+    append_msg: str
+        String to append to all errors raised.
+    replace: dict[str, str]
+        Dictionary with key-value pairs that replace key with value if key is found in the error message.
+    notes: dict[str, str]
+        Dictionary that adds the value as a note if the key is found in the error message (after replacement by replace).
+    """
     if any(invalid_excepts := [not (isinstance(excep, Exception) or "Exception" in str(excep)) for excep in exceptions]):
         raise ValueError(f"Got non-ExceptionType in exceptions arguments: {[t[0] for t in zip(exceptions,invalid_excepts) if t[1]==1]}")
 
@@ -136,8 +151,9 @@ def pandas_string_rep(obj: pd.DataFrame|pd.Series, bound: int|tuple[int,int]=5):
         raise ValueError("obj must be a Series or DataFrame")
 
 def add_notes(error: Exception, *notes):
+    """Adds notes to an Exception if they are non-empty strings"""
     for note in notes:
-        error.add_note(note) if note else None
+        error.add_note(note) if (note and isinstance(note,str)) else None
     return error
 
 def stats(df: pd.DataFrame):
@@ -291,3 +307,11 @@ def _sort(value: Iterable) -> tuple[list,list,list]:
             uivals.append(k) if k not in uivals else None
         final_i_ls.extend(uivals)
     return return_val,final_i_ls,[value[k] for k in final_i_ls]
+
+def combine_cols_with_errors(df: pd.DataFrame, error_suffix: str = " SD", round: bool|int = False):
+    """Combines all columns that have an error column to an error margin (dtype to object), e.g. ``["val","val SD"]:[1.0,0.1]`` -> ``["val"]:["1.0 ± 0.1"]``"""
+    paired_columns = [(col,col+error_suffix) if (col+error_suffix in df.columns) else col for col in df.columns if not col.endswith(error_suffix)]
+    if round is not False:
+        df_new = df.round(round)
+        return pd.concat([df[col] if isinstance(col,str) else pd.DataFrame({col[0]:df_new[col[0]].astype(str) + " ± " + df_new[col[1]].astype(str)}) for col in paired_columns],axis=1)
+    return pd.concat([df[col] if isinstance(col,str) else pd.DataFrame({col[0]:df[col[0]].astype(str) + " ± " + df[col[1]].astype(str)}) for col in paired_columns],axis=1)

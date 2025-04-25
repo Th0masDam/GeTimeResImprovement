@@ -33,6 +33,19 @@ def plot_transform(transformed_data, labels, n_components, projection: int = 0):
     else:
         print("[WARNING][GeWaPro][plotting.plot_transform] Plotting failed: Number of components must be smaller than 5 to plot")
 
+def change_combined_line_fig(fig: go.Figure, remove_traces: list[int], hide_traces: list[int]) -> go.Figure:
+    remove_traces = [[3*t,3*t+1,3*t+2] for t in remove_traces]
+    hide_traces = [3*t+1 for t in hide_traces]
+    new_traces_data = []
+    for i,trace in enumerate(fig.data):
+        if i in [t for ls in remove_traces for t in ls]:
+            continue
+        elif i in hide_traces:
+            trace.visible = "legendonly"
+        new_traces_data.append(trace)
+    fig.data = tuple(new_traces_data)
+    return fig
+
 def energy_histogram(source_data: str,
                      data_dict: dict[str,pd.DataFrame],
                      select_channels: list[int]|int = [],
