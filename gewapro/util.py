@@ -130,7 +130,8 @@ def get_len(start: int,end: int,step: int) -> int:
 def join_strings(iterable: Iterable, bound: int=5, final_connector: str = "or", wrap_str: bool|str="\"", wrap_all: bool|str = False) -> str:
     """Joins all items in ``iterable`` (up to max ``bound``) with ',' and the final with ``final_connector``
     
-    Strings will be wrapped with the ``wrap_str`` argument, by default with double quotes (")"""
+    - Bound can be removed when set to None or False
+    - Strings will be wrapped with the ``wrap_str`` argument, by default with double quotes (")"""
     bound,show = (bound, bound-2) if isinstance(bound,int) else bound
     fc = " "+final_connector
     wrap_str = str(wrap_str) if wrap_str else ""

@@ -110,7 +110,7 @@ class ModelInfo:
         else:
             raise ValueError(f"Unknown PCA decomposition method '{PCA_fit}' passed to PCA_fit, known methods are 'sklearn.decomposition.PCA' and 'sklearn.decomposition.TruncatedSVD'")
     
-    @strictclassmethod
+    @classmethod
     def from_database(cls, model_name: str, model_version: int) -> "ModelInfo":
         "Instantiates ModelInfo from model with certain name and version from database"
         replacer = {f"Model Version (name={model_name}, version={model_version}) not found": "Unknown model version",
@@ -150,6 +150,14 @@ def model_type(model) -> str:
     elif isinstance(model, keras.Sequential) or str(getattr(model,"loader_module","")) == "mlflow.keras":
         return "KerasNN"
     return f"{model.__module__} {model.__class__} {model.__qualname__}"
+
+def get_model_name(model):
+    if (m_type := model_type(model)) in ["SKLearnNN","XGBRegressor"]:
+        return m_type
+    elif m_type == "KerasNN":
+        return model.name   
+    else:
+        raise ValueError(f"Failed to get name of model; model type not recognized: '{m_type}'")
 
 def regressor_model(type: Literal["SKLearn","TensorFlow","XGBoost"], pca_components: int, hidden_layers: list[int] = [], activation = "relu", alpha = 1e-4, max_iter=200, **kwargs):
     """Initializes a regressor model for training
@@ -304,7 +312,7 @@ def loggable_model_metrics(fitted_model, data_test, labels_test):
         raise ValueError(f"Model type not recognized: '{m_type}'")
 
 @print_warnings()
-def log_model(fitted_model, d_train: np.ndarray, predicted_train: np.ndarray, PCA_seed: int, PCA_method: str, registered_model_name: str = "auto") -> model.ModelInfo:
+def log_model(fitted_model, d_train: np.ndarray, predicted_train: np.ndarray, PCA_seed: int, PCA_method: str, run_id: str, registered_model_name: str = "auto") -> model.ModelInfo:
     """Model type agnostic logging function for MLFlow. Can log keras' Sequential NN model, xgboost's XGBoostedTree and sklearn's MLPRegressorModel
     
     INFO: predicted_train is only used to infer the function signature (so not fully logged)"""
@@ -315,9 +323,10 @@ def log_model(fitted_model, d_train: np.ndarray, predicted_train: np.ndarray, PC
             artifact_path="sk_models",
             signature=infer_signature(d_train, predicted_train),
             input_example=d_train[:1],
-            registered_model_name="MLPRegressorModel" if autoreg else registered_model_name,
+            registered_model_name=get_model_name(fitted_model) if autoreg else registered_model_name,
             metadata={"PCA random seed": PCA_seed,
-                      "PCA method": PCA_method}
+                      "PCA method": PCA_method,
+                      "run_id": run_id}
         )
     elif m_type == "XGBRegressor":
         return mlflow.xgboost.log_model(
@@ -325,9 +334,10 @@ def log_model(fitted_model, d_train: np.ndarray, predicted_train: np.ndarray, PC
             artifact_path="xgboost_models",
             signature=infer_signature(d_train, predicted_train),
             input_example=d_train[:1],
-            registered_model_name="XGBoostedTree" if autoreg else registered_model_name,
+            registered_model_name=get_model_name(fitted_model) if autoreg else registered_model_name,
             metadata={"PCA random seed": PCA_seed,
-                      "PCA method": PCA_method}
+                      "PCA method": PCA_method,
+                      "run_id": run_id}
         )
     elif m_type == "KerasNN":
         return mlflow.keras.log_model(
@@ -335,15 +345,20 @@ def log_model(fitted_model, d_train: np.ndarray, predicted_train: np.ndarray, PC
             artifact_path="keras_models",
             signature=infer_signature(d_train, predicted_train),
             input_example=d_train[:1],
-            registered_model_name=fitted_model.name if autoreg else registered_model_name,
+            registered_model_name=get_model_name(fitted_model) if autoreg else registered_model_name,
             metadata={"PCA random seed": PCA_seed,
-                      "PCA method": PCA_method}
+                      "PCA method": PCA_method,
+                      "run_id": run_id}
         )
     else:
         raise ValueError(f"Model type not recognized: '{m_type}'")
 
-def _get_model_types(runs: pd.DataFrame, verbose: bool = False):
+def _get_model_names(runs: pd.DataFrame, verbose: bool = False):
     found_types = []
+    if "params.Model name" in runs.columns:
+        unique_names = set(runs["params.Model name"].to_list())
+        return list(unique_names)
+    # Keep this for backward compatibility:
     print("runs['tags.mlflow.log-model.history'][0]: ", runs["tags.mlflow.log-model.history"][0]) if verbose else None
     if runs["tags.mlflow.log-model.history"].str.contains('"artifact_path": "xgboost_models"').sum() > 0:
         found_types.append("XGBoostedTree")
@@ -355,14 +370,15 @@ def _get_model_types(runs: pd.DataFrame, verbose: bool = False):
 @cache(cache_dir=os.path.join("data","cache"), ignore_args=["verbose"])
 def _get_version_map_for_length(exp_id: list[str], experiment_length: int, verbose:bool=False):
     all_runs: pd.DataFrame = mlflow.search_runs(experiment_ids=exp_id,search_all_experiments=True)
-    mapping = {}
-    for model in _get_model_types(all_runs):
+    v_pca_mapping = {}
+    for model in _get_model_names(all_runs):
         raised, i = 0, 0
         print(f"[GeWaPro][models.get_model_version_map] Trying to get mapper for model type {model}...")
         while not raised:
             i += 1
             try:
-                mapping[f"{model}_v{i}"] = str(mlflow.pyfunc.load_model(model_uri=f"models:/{model}/{i}").metadata.metadata.get("PCA random seed",np.nan))
+                metadata = mlflow.pyfunc.load_model(model_uri=f"models:/{model}/{i}").metadata.metadata
+                v_pca_mapping[f"{model}_v{i}"] = (str(metadata.get("PCA random seed",np.nan)), metadata.get("run_id", "None"))
             except OSError:
                 continue
             except TypeError:
@@ -371,8 +387,8 @@ def _get_version_map_for_length(exp_id: list[str], experiment_length: int, verbo
                 print(f"[GeWaPro][models.get_model_version_map] {e.__class__.__name__} was raised for {model}, ending mapper loop: {e}") if verbose else None
                 raised = 1
 
-    # Create model version series & Remove duplicate indices
-    model_version = pd.DataFrame(data={"model_version":list(mapping.keys()),"run_id":[None]*len(mapping.keys())},index=list(mapping.values()))
+    # Create model version series indexed by PCA seed & Remove duplicate indices
+    model_version = pd.DataFrame(data={"model_version":list(v_pca_mapping.keys()),"run_id_saved":[v[1] for v in v_pca_mapping.values()]},index=[v[0] for v in v_pca_mapping.values()])
     model_version = model_version[~model_version.index.duplicated(keep='first')]
     print("[GeWaPro][models.get_model_version_map] Model version:", pandas_string_rep(model_version,25)) if verbose else None
     display(model_version) if verbose else None

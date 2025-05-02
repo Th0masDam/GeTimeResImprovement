@@ -16,18 +16,27 @@ from gewapro.preprocessing import get_waveforms
 from gewapro.cache import cache
 from gewapro.util import stats, join_strings, pandas_string_rep, add_notes, name_to_vals
 
-PLOT_SETTINGS = {"show_dt":True, "show_pred":True, "which": "Tfit", "default_plot_mode": "Bar", "show_progess_bar": False}
+DEFAULT_HIST_FITS = {"Gaussian": gaussian, "Inv. Quadratic": inverse_quadratic}
+PLOT_SETTINGS: dict[str,str|dict] = {"show_dt":True, "show_pred":True, "which": "Tfit", "default_plot_mode": "Bar", "show_progess_bar": False, "histogram_fits": DEFAULT_HIST_FITS}
 os.environ['MLFLOW_ENABLE_ARTIFACTS_PROGRESS_BAR'] = "False"
 
 def settings(**new_settings):
-    """Update or show the plot settings"""
+    """Update or show the plot settings. Use `settings.reset()` to reset to initial defaults."""
     global PLOT_SETTINGS
     try:
         updated_settings = {setting:value for setting,value in new_settings.items() if PLOT_SETTINGS[setting] != value}
         if updated_settings.get("default_plot_mode","bar") not in ["Bar", "Line", "bar", "line"]:
             raise ValueError(f"default_plot_mode must be 'Bar' or 'Line', got '{updated_settings['default_plot_mode']}'")
         if updated_settings.get("show_progess_bar", False) not in [True, False]:
-            raise ValueError(f"show_progess_bar must be bool")
+            raise ValueError("show_progess_bar must be bool")
+        if isinstance((new_hist_fits:=updated_settings.get("histogram_fits", {})), dict):
+            if any(key in new_hist_fits.keys() for key in ["Gaussian", "Inv. Quadratic"]):
+                raise ValueError("Defaults 'Gaussian' & 'Inv. Quadratic' cannot be changed or removed from histogram_fits")
+            if invalid_hist_fits := [f"'{n}' ({type(c)})" for n,c in new_hist_fits.items() if not callable(c)]:
+                raise ValueError(f"All new custom fit methods must be a callable function, but got invalid {', '.join(invalid_hist_fits)}")
+            updated_settings["histogram_fits"] = (new_hist_fits | DEFAULT_HIST_FITS)
+        else:
+            raise ValueError("histogram_fits must be dict")
     except KeyError as e:
         raise add_notes(ValueError("Could not update settings due to invalid setting: "+str(e)), f"Valid settings are: "+", ".join(list(PLOT_SETTINGS.keys()))) from e
     if new_settings.get("show_progess_bar", False) is True:
@@ -36,10 +45,23 @@ def settings(**new_settings):
         os.environ['MLFLOW_ENABLE_ARTIFACTS_PROGRESS_BAR'] = "False"
     PLOT_SETTINGS |= new_settings
     if updated_settings:
+        if new_hist_fits:
+            print("[WARNING][GeWaPro][plotting.settings] Got new functions for histogram fitting, note these may still not work since formats (function signatures) were not checked for validity")
+        else:
+            updated_settings.pop("histogram_fits")
         print("[GeWaPro][plotting.settings] Updated plot settings: "+", ".join([f"{s} = {v}" for s,v in updated_settings.items()]))
     else:
         print("[GeWaPro][plotting.settings] Settings not changed: "+", ".join([f"{s} = {v}" for s,v in PLOT_SETTINGS.items()]))
     return PLOT_SETTINGS
+
+def _reset_plot_settings():
+    """Resets the plot settings to the initial defaults"""
+    global PLOT_SETTINGS
+    PLOT_SETTINGS = {"show_dt":True, "show_pred":True, "which": "Tfit", "default_plot_mode": "Bar", "show_progess_bar": False, "histogram_fits": DEFAULT_HIST_FITS}
+    return PLOT_SETTINGS
+
+settings.reset = _reset_plot_settings
+"""Resets the plot settings to the initial defaults"""
 
 def histogram(data: pd.DataFrame|pd.Series,
               bins: list[int] = None,
@@ -72,8 +94,8 @@ def histogram(data: pd.DataFrame|pd.Series,
             print(f"[WARNING][GeWaPro][plotting.histogram] No (valid) bins provided, assuming start {bins[0]:.0f}, end {bins[1]:.0f} and step {bins[2]}")
     if not add_fits:
         add_fits = []
-    elif not isinstance(add_fits, list) or any([fit_name not in ["Gaussian","Inv. Quadratic"] for fit_name in add_fits]):
-        raise ValueError("add_fits must be a list containing 'Gaussian' and/or 'Inv. Quadratic'")
+    elif not isinstance(add_fits, list) or any([fit_name not in PLOT_SETTINGS['histogram_fits'] for fit_name in add_fits]):
+        raise ValueError(f"add_fits must be a list containing {join_strings(PLOT_SETTINGS['histogram_fits'])}")
     mode = PLOT_SETTINGS["default_plot_mode"] if mode.lower() == "default" else mode
     fig = go.Figure()
     options = {"xaxis_range":[bins[0],bins[1]]} | options
@@ -121,7 +143,7 @@ def histogram(data: pd.DataFrame|pd.Series,
                                 ))
         else:
             raise ValueError(f"Got invalid mode (must be either \"Line\" or \"Bar\"): {mode}")
-        for fit_name,fit_func in {"Gaussian":gaussian,"Inv. Quadratic":inverse_quadratic}.items():
+        for fit_name,fit_func in PLOT_SETTINGS["histogram_fits"].items():
             if fit_name not in add_fits:
                 continue
             try:
@@ -265,7 +287,7 @@ def plot_predictions(on_data: str,
 
     # Get regressor and PCA data in right format
     modelinfo: ModelInfo = ModelInfo.from_database(model_name, model_version)
-    regressor, dt_correction_mode, pca_method, pca_components = modelinfo.model, modelinfo.dt_correcting, modelinfo.pca_method, modelinfo.pca_components
+    regressor, dt_correction_mode, pca_method, pca_components = modelinfo.model, getattr(modelinfo, "dt_correcting", False), modelinfo.pca_method, modelinfo.pca_components
     if isinstance(PCA_fit, str):
         pca_model = modelinfo.get_transformer()
     else:

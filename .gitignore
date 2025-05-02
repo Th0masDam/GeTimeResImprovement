@@ -9,3 +9,4 @@ data/*.csv
 data/*.dat
 mlruns/
 mlartifacts/
+personal.ipynb

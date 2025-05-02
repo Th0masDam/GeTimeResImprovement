@@ -14,8 +14,8 @@ import plotly.graph_objects as go
 from gewapro.preprocessing import get_waveforms, train_test_split_cond, get_and_smoothen_waveforms
 from gewapro.plotting import histogram, energy_scatter_plot
 from typing import Callable, Literal
-from gewapro.models import regressor_model, train_model, predict, loggable_model_params, loggable_model_metrics, model_type, log_model
-from gewapro.util import name_to_vals, warn_wrapper
+from gewapro.models import regressor_model, train_model, predict, loggable_model_params, loggable_model_metrics, model_type, log_model, get_model_name
+from gewapro.util import name_to_vals, warn_wrapper, add_notes
 from_numpy = warn_wrapper(from_numpy, "[WARNING] <Message>")
 
 def sort_test_ranges(test_set_ranges: list[int]) -> list[tuple[int,int]]:
@@ -77,6 +77,7 @@ def run_experiment(data: pd.DataFrame,
                    show_progress_bar: bool = False,
                    log_level: Literal["WARNING","INFO","DEBUG","ERROR"] = "WARNING",
                    which: str = "Tfit",
+                   registered_model_name: str = "auto",
                    **kwargs
                    ):
     """Runs & logs an MLFlow experiment with the given parameters, returns a figure as output
@@ -91,38 +92,41 @@ def run_experiment(data: pd.DataFrame,
     select_channels: list[int]|int
         Channels to select. Note that when the source data contains only channel A and you pass here channel
         B,there will not be any waveform data and the experiment will fail.
-    select_energies: tuple[int,int] = None
+    select_energies: tuple[int,int], default None
         Energies to select from the source data.
-    include_energy: bool = False
+    include_energy: bool, default False
         Whether to include the energy column as a predictor (feature).
-    applied_conditions = None
+    model_type: Literal["SKLearn","TensorFlow","XGBoost"], default "SKLearn"
+        The type of model to instantiate, SKLearn Neural Network, TensorFlow Neural Network, or XGBoost
+        Tree regressor.
+    applied_conditions, default None
         Conditions applied to the selection of the source data.
-    applied_conditions_names: list = None
+    applied_conditions_names: list, default None
         Name of the conditions, used for logging (and your own administration).
-    smoothing_window: int|tuple[int,int] = None
+    smoothing_window: int|tuple[int,int], default None
         Not recommended. Smoothing to use.
-    smoothing_energy_range: tuple[int,int] = None
+    smoothing_energy_range: tuple[int,int], default None
         Not recommended. Smoothing energy range to use.
-    normalize_after_smoothing: bool = False
+    normalize_after_smoothing: bool, default False
         Not recommended. Whether to normalize again after smoothing.
-    remove_nan_waveforms: bool = False
+    remove_nan_waveforms: bool, default False
         Whether to remove completely empty waveforms.
-    pca_components: int = 64
+    pca_components: int, default 64
         Number of PCA components.
-    pca_method: PCA|TruncatedSVD = PCA
+    pca_method: PCA|TruncatedSVD, default PCA
         PCA method.
-    return_regressor: bool = False
-        Whether to return the finally fitted regressor.
-    uniform_test_set: list[int] = []
+    return_regressor: bool, default False
+        Whether to return the finally fitted regressor together with the results plot.
+    uniform_test_set: list[int], default []
         List of uniform test sets to include in the model evaluation. E.g. [0,500,1500,400,1000] will create sets
         of ranges 0 - 500, 500 - 1500 and 400 - 1000, with equal number of waveforms in each set.
-    test_size: float = 0.5
+    test_size: float, default 0.5
         Testing set size, by default 50%.
-    show_progress_bar: bool = False
+    show_progress_bar: bool, default False
         Whether to show the annoying MLFlow progress bar in the output.
-    log_level: Literal["WARNING","INFO","DEBUG","ERROR"] = "WARNING"
+    log_level: Literal["WARNING","INFO","DEBUG","ERROR"], default "WARNING"
         Log level of the output during the experiment.
-    which: str = "Tfit"
+    which: str, default "Tfit"
         Which label to train the model on.
     
     Extra args for NN
@@ -190,7 +194,9 @@ def run_experiment(data: pd.DataFrame,
 
     # Get labels
     available_length = av_len or get_waveforms(source_data=data, get_indices_map=False, select_channels=select_channels).shape[1]
-    labels_t = np.array([name_to_vals(col)[which] for col in data_df.columns])
+    labels_t = np.array(cols_list := [name_to_vals(col)[which] for col in data_df.columns])
+    if "-" in cols_list:
+        raise add_notes(ValueError(f"No '{which}' column found in data, failed to create training labels"), f"Either set the 'which' parameter in run_experiment(...) to an existing column, or add the '{which}' column to your input data.")
     labels_x = t_to_x(labels_t)
     wave_i = np.array([int(col[col.find("[")+1:col.find("]")]) for col in data_df.columns])
 
@@ -270,6 +276,7 @@ def run_experiment(data: pd.DataFrame,
         normalize_str = f" normalized to {normalize_after_smoothing}" if (isinstance(normalize_after_smoothing, int) and normalize_after_smoothing) else ""
         smooth_str = ("single " if isinstance(smoothing_window,int) else "double ")+f"{smoothing_window}".strip("()").replace(", "," - ")+normalize_str
         mlflow.log_params({
+            "Model name": registered_model_name if registered_model_name != "auto" else get_model_name(regr),
             "Channels used": str(select_channels).strip("[]").replace(",",""),
             "Energy range used": str(select_energies).strip("[]").replace(", "," - "),
             "Energy included for training": include_energy,
@@ -317,7 +324,9 @@ def run_experiment(data: pd.DataFrame,
                                d_train=d_train,
                                predicted_train=predicted_train,
                                PCA_seed=PCA_seed,
-                               PCA_method=pca_method_str)
+                               PCA_method=pca_method_str,
+                               run_id=mlflow_run.info.run_id,
+                               registered_model_name=registered_model_name)
         print(f"[GeWaPro][experiment_flow.run_experiment] Logged model in {datetime.now()-now}. Run '{run_name}' finished (run ID: {mlflow_run.info.run_id})")
     if return_regressor:
         return fig_hist, regr

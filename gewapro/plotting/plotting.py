@@ -160,7 +160,7 @@ def box_plot(exp_id: list[int]|int,
         raise ValueError("The sort_by argument must be a single column string or a list of at most two column strings")
     hover_kwargs = {} | {k:h for k,h in {k:kwargs.pop(k,[]) for k in ["hover_data","hover_name"]}.items() if h}
     box_kwargs = extra_vars | hover_kwargs
-    title: str = title or f"Boxplot of {y} vs "+" vs ".join([x]+[v for v in extra_vars.values() if v])
+    title: str = title or f"Box plot of {y} vs "+" vs ".join([x]+[v for v in extra_vars.values() if v])
 
     # Check if y value is Callable, if so then add it as a column and set name of y as y variable
     if callable(y_func := y):
@@ -213,6 +213,8 @@ def box_plot(exp_id: list[int]|int,
                     show_original_FWHM = False
             if not show_original_FWHM:
                 print(f"[WARNING][GeWaPro][plotting.box_plot] Failed to add original FWHM to graph due to {excep_to_raise.__class__.__qualname__}: {excep_to_raise}")
+        else:
+            original_fwhm, show_original_FWHM = "", False
         fwhm_line_kwargs = {"annotation_text":f"Original FWHM: {original_fwhm}" if original_fwhm else "", "annotation_position":"bottom left","annotation_font_color":"grey", "line_color":"grey", "line_width":1}
         fwhm_line_kwargs |= {k:v for k in fwhm_line_kwargs.keys() if (v:=kwargs.pop(k, ""))}
 
@@ -252,8 +254,9 @@ def box_plot(exp_id: list[int]|int,
 
     # Add model version map
     display_runs = display_runs.set_index("run_id")
-    display_runs["model_version"] = get_model_version_map(exp_id)["model_version"]
-    display_runs["model_version"] = display_runs["model_version"].fillna("UNKNOWN MODEL & VERSION")
+    if "model_version" in box_kwargs.values():
+        display_runs["model_version"] = get_model_version_map(exp_id)["model_version"]
+        display_runs["model_version"] = display_runs["model_version"].fillna("UNKNOWN MODEL & VERSION")
 
     # Sort the columns if wanted
     if (sort_by:=[sort_by] if isinstance(sort_by, str) else sort_by):

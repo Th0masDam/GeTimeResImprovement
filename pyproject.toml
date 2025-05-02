@@ -21,7 +21,7 @@ dependencies = [
     "xgboost (>=3.0.0,<4.0.0)",
     "numba (>=0.61.2,<0.62.0)",
     "keras (>=3.9.2,<4.0.0)",
-    "tensorflow (>=2.17.0,<3.0.0)"
+    "tensorflow (==2.17.0)"
 ]
 
 [build-system]
